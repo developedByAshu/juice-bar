@@ -1,0 +1,108 @@
+use juicebar_shared::device::{Battery, Connection, Device, DeviceKind, NameSource};
+use juicebar_shared::names::{resolve_name, NameCandidates};
+use juicebar_shared::protocols::bytech::{build_request, parse_power_answer, Bytech};
+use juicebar_shared::protocols::{BatteryProtocol, Reading};
+use juicebar_shared::report::report_url;
+use juicebar_shared::settings::Settings;
+use juicebar_shared::tone::{icon_tone, tone_for_percent, Tone};
+use juicebar_shared::transport::ReplayTransport;
+
+fn fixture(name: &str) -> String {
+    std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).expect("fixture")
+}
+
+fn device_at(percent: u8, connection: Connection, is_charging: bool) -> Device {
+    Device {
+        id: format!("test:{percent}"),
+        kind: DeviceKind::Mouse,
+        connection,
+        name: "Test".into(),
+        name_source: NameSource::Catalog,
+        battery: Some(Battery { percent, is_charging }),
+        protocol: Some("bytech"),
+        vendor_id: 0x3554,
+        product_id: 0xFA09,
+    }
+}
+
+#[test]
+fn tone_boundaries_follow_the_agreed_rule() {
+    assert_eq!(tone_for_percent(100), Tone::Green);
+    assert_eq!(tone_for_percent(86), Tone::Green);
+    assert_eq!(tone_for_percent(85), Tone::Plain);
+    assert_eq!(tone_for_percent(31), Tone::Plain);
+    assert_eq!(tone_for_percent(30), Tone::Amber);
+    assert_eq!(tone_for_percent(20), Tone::Amber);
+    assert_eq!(tone_for_percent(19), Tone::Red);
+    assert_eq!(tone_for_percent(0), Tone::Red);
+}
+
+#[test]
+fn icon_takes_the_lowest_device_and_skips_cable_and_charging() {
+    let both_high = [device_at(90, Connection::Dongle, false), device_at(88, Connection::Bluetooth, false)];
+    assert_eq!(icon_tone(&both_high), Tone::Green);
+    let one_low = [device_at(90, Connection::Dongle, false), device_at(15, Connection::Dongle, false)];
+    assert_eq!(icon_tone(&one_low), Tone::Red);
+    let low_on_cable = [device_at(90, Connection::Dongle, false), device_at(15, Connection::Usb, false), device_at(10, Connection::Dongle, true)];
+    assert_eq!(icon_tone(&low_on_cable), Tone::Green);
+    assert_eq!(icon_tone(&[]), Tone::Plain);
+}
+
+#[test]
+fn names_never_show_a_brand_shared_family_name() {
+    let shared_chip = NameCandidates { catalog: Some(("Yuandaxin wireless mouse".into(), true)), usb_product: Some("2.4G Wireless Receiver".into()), ..Default::default() };
+    assert_eq!(resolve_name(DeviceKind::Mouse, &shared_chip), ("Unknown mouse".to_string(), NameSource::Unknown));
+    let with_bluetooth = NameCandidates { bluetooth_memory: vec!["XS Flow+1".into()], ..shared_chip.clone() };
+    assert_eq!(resolve_name(DeviceKind::Mouse, &with_bluetooth), ("XS Flow+1".to_string(), NameSource::BluetoothMemory));
+    let two_remembered = NameCandidates { bluetooth_memory: vec!["A".into(), "B".into()], ..shared_chip };
+    assert_eq!(resolve_name(DeviceKind::Mouse, &two_remembered).1, NameSource::Unknown);
+    let renamed = NameCandidates { user_rename: Some("Desk mouse".into()), bluetooth_memory: vec!["XS Flow+1".into()], ..Default::default() };
+    assert_eq!(resolve_name(DeviceKind::Mouse, &renamed), ("Desk mouse".to_string(), NameSource::UserRename));
+}
+
+#[test]
+fn settings_survive_a_round_trip_and_skip_broken_lines() {
+    let mut settings = Settings { poll_minutes: 10, shows_percent_in_icon: true, is_saved_to_disk: false, ..Settings::default() };
+    settings.renames.insert("3554:fa09:".into(), "Desk keyboard".into());
+    settings.hidden.push("04f3:026f:".into());
+    let loaded = Settings::from_text(&(settings.to_text() + "garbage line\npoll_minutes=999\n"));
+    assert_eq!(loaded.renames, settings.renames);
+    assert_eq!(loaded.hidden, settings.hidden);
+    assert_eq!(loaded.poll_minutes, 60);
+    assert!(loaded.shows_percent_in_icon);
+}
+
+#[test]
+fn bytech_request_matches_the_recorded_bytes() {
+    assert_eq!(build_request(0x4A), vec![0x13, 0x4a, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x5e]);
+}
+
+#[test]
+fn bytech_reads_the_recorded_swarm75_answer() {
+    let mut transport = ReplayTransport::from_fixture(&fixture("bytech_swarm75_battery.txt"));
+    assert_eq!(Bytech.read_battery(&mut transport).unwrap(), Reading::Battery(Battery { percent: 100, is_charging: false }));
+    assert!(transport.is_finished());
+}
+
+#[test]
+fn bytech_skips_a_pushed_event_before_the_answer() {
+    let mut transport = ReplayTransport::from_fixture(&fixture("bytech_swarm75_event_first.txt"));
+    assert_eq!(Bytech.read_battery(&mut transport).unwrap(), Reading::Battery(Battery { percent: 60, is_charging: false }));
+}
+
+#[test]
+fn bytech_rejects_a_corrupt_answer_and_reports_offline_on_silence() {
+    let mut corrupt = vec![0x13, 0x4a, 0x01, 0x00, 0x02, 0x64, 0x01];
+    corrupt.resize(20, 0);
+    corrupt[19] = 0x00;
+    assert_eq!(parse_power_answer(&corrupt), None);
+    let mut silent = ReplayTransport::from_fixture("W 13 4a 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 5e");
+    assert_eq!(Bytech.read_battery(&mut silent).unwrap(), Reading::DeviceOffline);
+}
+
+#[test]
+fn report_url_carries_ids_and_no_personal_data() {
+    let url = report_url(&device_at(50, Connection::Dongle, false), &[], "macOS 26", "0.1.0");
+    assert!(url.starts_with("https://github.com/developedByAshu/juice-bar/issues/new?title=Device%20report%3A%203554%3Afa09"));
+    assert!(url.contains("Vendor%20id%3A%200x3554"));
+}

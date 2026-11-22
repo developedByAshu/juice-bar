@@ -84,7 +84,9 @@ pub fn read_usb_device(api: &hidapi::HidApi, device: &UsbDevice) -> (Reading, Op
             }
         }
     }
-    (Reading::NoAnswer, None)
+    // A known device that did not answer is asleep or off, not unknown.
+    let known = device.interfaces.iter().find_map(|(summary, _)| find_known(device.vendor_id, device.product_id, summary.usage_page));
+    known.map_or((Reading::NoAnswer, None), |known| (Reading::DeviceOffline, Some(known.protocol)))
 }
 
 /// Builds the menu row for a USB device from its reading, the settings and remembered Bluetooth names.
@@ -101,7 +103,7 @@ pub fn build_device(device: &UsbDevice, reading: &Reading, protocol: Option<&'st
         usb_product: Some(device.product.clone()),
     };
     let (name, name_source) = resolve_name(kind, &candidates);
-    let is_wireless = known.map_or(true, |known| known.is_wireless);
+    let is_wireless = known.is_none_or(|known| known.is_wireless);
     Device {
         id,
         kind,

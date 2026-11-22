@@ -1,0 +1,4 @@
+# Kreo Swarm 75 over its 2.4 GHz dongle (3554:fa09, page 0xFF02), recorded on the Mac 23 Nov 2026 03:40 IST.
+# GET_POWER (0x4A) on report id 19; answer: 100%, flag byte 01.
+W 13 4a 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 5e
+R 13 4a 01 00 02 64 01 00 00 00 00 00 00 00 00 00 00 00 00 c5

@@ -20,6 +20,7 @@ pub struct KnownDevice {
     pub is_wireless: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 const fn entry(
     vendor_id: u16,
     product_id: u16,
