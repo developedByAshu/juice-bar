@@ -4,7 +4,7 @@
 //! interval; nothing runs between them. A read talks to the dongles, which can take a moment, so
 //! it runs on one long-lived read thread that owns the only HidApi and posts results back to the UI thread.
 
-use crate::bluetooth::{bluetooth_devices, remembered_bluetooth_names};
+use crate::bluetooth::{bluetooth_devices, remembered_names_by_kind};
 use crate::menu_ui::{close_menu, is_menu_open, refresh_menu, show_menu, take_menu_action, MenuAction};
 use crate::messages::WM_APP_SCAN_DONE;
 use crate::settings_ui::{close_settings, open_settings, refresh_settings};
@@ -108,17 +108,17 @@ fn scan(api: &mut Option<hidapi::HidApi>, request: &ScanRequest) -> ScanResult {
         let _ = api.refresh_devices();
     }
     if let Some(api) = api.as_ref() {
-        // Hidden devices are read too, so Settings can show them and turn them back on.
-        let mut everything = settings.clone();
-        everything.hidden.clear();
-        for ScannedDevice { usb, mut device } in scan_dongles(api, &everything, &remembered_bluetooth_names) {
+        // One pass over Windows' device list per read, not one per dongle.
+        let remembered = remembered_names_by_kind();
+        let names_for = |kind| remembered.iter().filter(|(of_kind, _)| *of_kind == kind).map(|(_, name)| name.clone()).collect::<Vec<_>>();
+        for ScannedDevice { usb, mut device } in scan_dongles(api, settings, &names_for) {
             let id = usb.id();
             // Try to detect tries every protocol once; a device it found one for is probed again on later reads.
             let wants_probe = probe_id == Some(id.as_str()) || (device.protocol.is_none() && request.probed.contains_key(&id));
             if wants_probe {
                 let (reading, protocol) = probe_usb_device(api, &usb);
                 if protocol.is_some() {
-                    device = build_device(&usb, &reading, protocol, &everything, &remembered_bluetooth_names(usb.kind()));
+                    device = build_device(&usb, &reading, protocol, settings, &names_for(usb.kind()));
                     if device.name_source == NameSource::Unknown {
                         device.name_source = NameSource::Catalog;
                     }
