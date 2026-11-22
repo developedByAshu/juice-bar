@@ -1,0 +1,14 @@
+[package]
+name = "juicebar-shared"
+version.workspace = true
+edition.workspace = true
+description = "Device protocols, names, colours and settings every Juice Bar app shares"
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "juicebar_shared"
+path = "src/lib.rs"
+
+[dependencies]
+hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }

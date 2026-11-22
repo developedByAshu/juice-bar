@@ -1,0 +1,72 @@
+name: Release
+
+# Builds and publishes the Windows and Mac programs when a version tag such as v1.0.0 is pushed.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run the tests
+        run: |
+          cargo test --release -p juicebar-shared
+          cargo test --release -p juicebar-mac --test readout_tests
+
+      - name: Build the app
+        run: SKIP_TESTS=1 ./mac/bundle.sh
+
+      - name: Zip the app
+        run: ditto -c -k --keepParent target/mac/JuiceBar.app JuiceBar-mac-arm64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-program
+          path: JuiceBar-mac-arm64.zip
+
+  release:
+    needs: mac
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: mac-program
+          path: dist
+
+      - name: Add the ARM target
+        run: rustup target add aarch64-pc-windows-msvc
+
+      - name: Run the tests
+        run: cargo test --release -p juicebar-shared -p juicebar-windows
+
+      - name: Build for x64
+        run: cargo build --release -p juicebar-windows --bin JuiceBar
+
+      - name: Build for ARM64
+        run: cargo build --release -p juicebar-windows --bin JuiceBar --target aarch64-pc-windows-msvc
+
+      - name: Collect the programs and their checksums
+        shell: pwsh
+        run: |
+          Copy-Item target\release\JuiceBar.exe dist\JuiceBar-x64.exe
+          Copy-Item target\aarch64-pc-windows-msvc\release\JuiceBar.exe dist\JuiceBar-arm64.exe
+          Get-ChildItem dist | ForEach-Object {
+            "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Set-Content dist\SHA256SUMS.txt
+
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create $env:GITHUB_REF_NAME dist\JuiceBar-x64.exe dist\JuiceBar-arm64.exe dist\JuiceBar-mac-arm64.zip dist\SHA256SUMS.txt `
+            --title "JuiceBar $env:GITHUB_REF_NAME" --notes-file docs\release-notes\$env:GITHUB_REF_NAME.md
