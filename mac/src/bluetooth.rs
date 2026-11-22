@@ -12,6 +12,8 @@ pub struct BluetoothEntry {
     pub kind: DeviceKind,
     pub is_connected: bool,
     pub battery: Option<u8>,
+    pub vendor_id: u16,
+    pub product_id: u16,
 }
 
 /// Returns every paired mouse and keyboard, connected or not.
@@ -42,7 +44,9 @@ pub fn parse_entries(json: &Value) -> Vec<BluetoothEntry> {
                         .iter()
                         .find_map(|field| details[*field].as_str())
                         .and_then(|text| text.trim_end_matches('%').trim().parse().ok());
-                    entries.push(BluetoothEntry { name: name.trim().to_string(), kind, is_connected, battery });
+                    let id_of = |field: &str| details[field].as_str().and_then(|text| u16::from_str_radix(text.trim_start_matches("0x"), 16).ok()).unwrap_or(0);
+                    let (vendor_id, product_id) = (id_of("device_vendorID"), id_of("device_productID"));
+                    entries.push(BluetoothEntry { name: name.trim().to_string(), kind, is_connected, battery, vendor_id, product_id });
                 }
             }
         }
@@ -62,16 +66,19 @@ pub fn bluetooth_devices(entries: &[BluetoothEntry]) -> Vec<Device> {
         .filter(|entry| entry.is_connected)
         .filter_map(|entry| {
             let percent = entry.battery?;
+            // An exact catalog name wins, as for dongles; a brand-shared chip keeps its Bluetooth name.
+            let exact = juicebar_shared::catalog::find_by_ids(entry.vendor_id, entry.product_id).filter(|known| !known.brand_shared);
+            let (name, name_source) = exact.map_or((entry.name.clone(), NameSource::DeviceReported), |known| (known.family_name.to_string(), NameSource::Catalog));
             Some(Device {
                 id: format!("bluetooth:{}", entry.name),
                 kind: entry.kind,
                 connection: Connection::Bluetooth,
-                name: entry.name.clone(),
-                name_source: NameSource::DeviceReported,
+                name,
+                name_source,
                 battery: Some(Battery { percent, is_charging: false }),
                 protocol: Some("bluetooth"),
-                vendor_id: 0,
-                product_id: 0,
+                vendor_id: entry.vendor_id,
+                product_id: entry.product_id,
             })
         })
         .collect()
