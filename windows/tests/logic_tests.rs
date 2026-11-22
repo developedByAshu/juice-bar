@@ -160,3 +160,55 @@ fn icon_pixels_lose_their_premultiplied_alpha() {
 fn startup_command_quotes_paths_with_spaces() {
     assert_eq!(startup_command("C:\\Program Files\\Juice Bar\\JuiceBar.exe"), "\"C:\\Program Files\\Juice Bar\\JuiceBar.exe\"");
 }
+
+mod bluetooth {
+    use juicebar_shared::device::DeviceKind;
+    use juicebar_windows::bluetooth::{bluetooth_address, hid_ids, kind_of, paired_to_device, Collections, PairedDevice};
+
+    fn paired(class_of_device: Option<u32>) -> PairedDevice {
+        PairedDevice { address: "C99C176C4EBB".into(), name: "XS Flow+2".into(), battery: Some(70), is_connected: true, class_of_device, container: None }
+    }
+
+    #[test]
+    fn address_comes_from_classic_and_le_ids() {
+        assert_eq!(bluetooth_address(r"BTHLE\DEV_C99C176C4EBB\9&22DC0FF&0&C99C176C4EBB").as_deref(), Some("C99C176C4EBB"));
+        assert_eq!(bluetooth_address(r"BTHENUM\DEV_F85C7E15AC36\9&2E5A28BA&1&BLUETOOTHDEVICE_F85C7E15AC36").as_deref(), Some("F85C7E15AC36"));
+        assert_eq!(bluetooth_address(r"BTHENUM\{0000110B-0000-1000-8000-00805F9B34FB}_VID&0001"), None);
+        assert_eq!(bluetooth_address(r"USB\VID_04F3&PID_026F"), None);
+    }
+
+    #[test]
+    fn hid_ids_drop_the_bluetooth_source_prefix() {
+        assert_eq!(hid_ids(r"HID\{00001812-0000-1000-8000-00805F9B34FB}_DEV_VID&0204F3_PID&026D_REV&0109_C99C176C4EBB&COL02\B&29AA687B&0&0001"), Some((0x04F3, 0x026D)));
+        assert_eq!(hid_ids(r"HID\VID_046D&PID_C52B"), None);
+    }
+
+    #[test]
+    fn le_mouse_with_a_button_keyboard_collection_is_a_mouse() {
+        let collections = Collections { mice: 1, keyboards: 1, vendor_id: 0x04F3, product_id: 0x026D };
+        assert_eq!(kind_of(&paired(None), &collections), DeviceKind::Mouse);
+    }
+
+    #[test]
+    fn le_keyboard_with_two_keyboard_collections_is_a_keyboard() {
+        let collections = Collections { mice: 1, keyboards: 2, vendor_id: 0x3554, product_id: 0xFA07 };
+        assert_eq!(kind_of(&paired(None), &collections), DeviceKind::Keyboard);
+    }
+
+    #[test]
+    fn classic_class_of_device_decides_before_collections() {
+        let none = Collections::default();
+        assert_eq!(kind_of(&paired(Some(0x0580)), &none), DeviceKind::Mouse);
+        assert_eq!(kind_of(&paired(Some(0x0540)), &none), DeviceKind::Keyboard);
+        assert_eq!(kind_of(&paired(Some(0x240404)), &none), DeviceKind::Other, "headphones");
+    }
+
+    #[test]
+    fn connected_device_row_is_bluetooth_with_its_battery() {
+        let device = paired_to_device(&paired(None), DeviceKind::Mouse, &Collections::default());
+        assert_eq!(device.id, "bt:c99c176c4ebb");
+        assert_eq!(device.battery.map(|battery| battery.percent), Some(70));
+        assert!(!device.is_unrecognised());
+        assert!(device.counts_for_icon());
+    }
+}
