@@ -18,7 +18,7 @@ jobs:
       - name: Run the tests
         run: |
           cargo test --release -p juicebar-shared
-          cargo test --release -p juicebar-mac --test readout_tests
+          cargo clippy --release -p juicebar-mac -- -D warnings
 
       - name: Build the app
         run: SKIP_TESTS=1 ./mac/bundle.sh

@@ -139,6 +139,13 @@ fn start_hid_thread() -> Sender<HidJob> {
             }
             match job {
                 HidJob::Scan(settings) => {
+                    // The mouse's interface (page 0x0A) opens only with Input Monitoring; ask once, when such a dongle is present.
+                    if let Some(api) = api.as_ref() {
+                        let needs_monitoring = api.device_list().any(|info| info.usage_page() == 0x000A && juicebar_shared::catalog::find_known(info.vendor_id(), info.product_id(), 0x000A).is_some());
+                        if needs_monitoring && !crate::permissions::has_input_monitoring() {
+                            crate::permissions::request_input_monitoring();
+                        }
+                    }
                     let bluetooth = read_bluetooth_entries();
                     let scanned = api.as_ref().map_or_else(Vec::new, |api| scan_dongles(api, &settings, &|kind| remembered_bluetooth_names(&bluetooth, kind)));
                     dispatch2::DispatchQueue::main().exec_async(move || {

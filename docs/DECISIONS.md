@@ -15,3 +15,10 @@ Each line: what was decided and why. Anything here can be reversed in the mornin
 | 9 | Keyboard charging flag follows the simulator (bit 4) until checked | The real reply at 100% had bit 0 set; could be "full" or "charging". Morning check: cable in and out |
 | 10 | Mouse left as "Not connected" on Mac tonight | Its interface needs Input Monitoring, a grant only the user can give; the app requests it on first run |
 | 11 | A known device that does not answer shows "Not connected", not "Unknown" | It is recognised, just asleep or off |
+| 12 | Icon is a juice glass with a straw, not a battery; level = lowest %, juice = tone | His ask at 03:22: unique to Juice Bar and recolourable. Geometry lives in shared/src/glyph.rs so Mac and Windows draw the same mark; SVG export uses currentColor |
+| 13 | App icon: orange to pink tile, white glass, yellow juice, white bolt | Warm "juice" colours, the bolt keeps the battery meaning; generated from the same geometry (mac/examples/make_icon.rs) |
+| 14 | Exact catalog name beats a remembered Bluetooth name | His keyboard showed "Kreo Swarm 5.0" (its Bluetooth name); "Kreo Swarm 75" is the exact model |
+| 15 | Unknown device: a submenu with Report device and Try to detect; known device: hold ⌥ to see Report | A Mac menu row has one click target; ⌥ alternates are the native way to offer a second action |
+| 16 | One long-lived HID thread owns hidapi | hidapi on macOS crashed when a second thread created it; also cheaper than a thread per scan |
+| 17 | Bluetooth names and battery from `system_profiler -json`, off the main thread, on scan only | No private APIs; zero cost between scans (measured 0.0% CPU idle) |
+| 18 | Input Monitoring is requested only when a dongle that needs it is plugged in | Most users never see the prompt; his mouse dongle needs it |

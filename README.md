@@ -1,0 +1,49 @@
+<p align="center"><img src="docs/icon.png" width="128" alt="Juice Bar icon"></p>
+
+# Juice Bar
+
+Battery % of your wireless mouse and keyboard, in the Mac menu bar and the Windows tray. Works over
+2.4 GHz dongles, where the OS shows nothing, and over Bluetooth. Free and open source (GPL-3.0).
+
+- **One glance:** a juice glass in the menu bar fills to your lowest device. Green when everything
+  is above 85%, plain from 30 to 85%, amber from 20 to 30%, red below 20%.
+- **One click:** every device with its real name, connection (2.4 GHz, Bluetooth, USB) and %.
+  A bolt when charging.
+- **Native and light:** AppKit on Mac, Fluent on Windows; follows light/dark, accent and contrast.
+  0.0% CPU at idle, about 14 MB of memory on the Mac.
+
+## Supported devices
+
+| # | Device | Connection | Status |
+|---|---|---|---|
+| 1 | Kreo Swarm 75 (dongle 3554:fa09) | 2.4 GHz | Reads %, verified |
+| 2 | Kreo Hawk Pro family, incl. Amkette XS Flow Pro Plus (dongle 04f3:026f) | 2.4 GHz | Name shown; % in progress |
+| 3 | Any mouse or keyboard macOS / Windows reports over Bluetooth | Bluetooth | Reads % from the OS |
+
+Not listed? Click the device in the menu, then **Report device**. It opens a prefilled GitHub issue
+with only the device's ids, so support can be added. **Try to detect** asks the device in every
+known protocol, only when you click it.
+
+## Install
+
+Download from Releases: `JuiceBar-mac-arm64.zip` (Apple Silicon), `JuiceBar-x64.exe`,
+`JuiceBar-arm64.exe`. On Mac, macOS may ask for **Input Monitoring**: some dongles (the Hawk Pro
+family) only answer once it is allowed.
+
+## Build
+
+```sh
+cargo test -p juicebar-shared       # protocols replay recorded device answers, no hardware needed
+./mac/bundle.sh                     # target/mac/JuiceBar.app
+cargo build --release -p juicebar-windows
+JUICEBAR_DEMO=1 ./target/mac/JuiceBar.app/Contents/MacOS/JuiceBar   # sample devices, for UI work
+```
+
+Layout: `shared/` holds devices, protocols, names, colours and settings; `mac/` and `windows/` only
+draw, with the same file and function names on both sides (`docs/CONTRACT.md`). Protocol notes in
+`docs/PROTOCOLS.md`.
+
+## Credits
+
+Protocol layouts learned from Kreo Kontrol's web app and from open source battery tools such as
+BatteryBar, BatteryTray, Wireless Device Battery Monitor and mouse_tray. Code here is our own.

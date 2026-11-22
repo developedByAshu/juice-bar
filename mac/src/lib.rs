@@ -11,6 +11,8 @@ pub mod delegate;
 #[cfg(target_os = "macos")]
 pub mod menu_ui;
 #[cfg(target_os = "macos")]
+pub mod permissions;
+#[cfg(target_os = "macos")]
 pub mod settings_ui;
 pub mod startup;
 #[cfg(target_os = "macos")]
