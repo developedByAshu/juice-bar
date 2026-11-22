@@ -1,4 +1,4 @@
-//! The "yuandaxin" protocol, as Kreo Kontrol speaks it. Bytes recovered from Kontrol's driver, see docs/PROTOCOLS.md.
+//! The "yuandaxin" mouse protocol. Battery bytes not recovered yet (see docs/PROTOCOLS.md), so it never answers.
 
 use super::{BatteryProtocol, Reading};
 use crate::transport::HidTransport;
@@ -12,7 +12,7 @@ impl BatteryProtocol for Yuandaxin {
     }
 
     fn usage_page(&self) -> u16 {
-        0
+        0x000A
     }
 
     fn read_battery(&self, _transport: &mut dyn HidTransport) -> Result<Reading, String> {

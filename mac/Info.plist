@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key><string>JuiceBar</string>
+    <key>CFBundleDisplayName</key><string>Juice Bar</string>
+    <key>CFBundleIdentifier</key><string>com.developedbyashu.juicebar</string>
+    <key>CFBundleExecutable</key><string>JuiceBar</string>
+    <key>CFBundleIconFile</key><string>JuiceBar</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleShortVersionString</key><string>VERSION_PLACEHOLDER</string>
+    <key>CFBundleVersion</key><string>VERSION_PLACEHOLDER</string>
+    <key>LSMinimumSystemVersion</key><string>12.0</string>
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <key>NSBluetoothAlwaysUsageDescription</key><string>Juice Bar reads the names and battery levels of your Bluetooth mice and keyboards.</string>
+</dict>
+</plist>

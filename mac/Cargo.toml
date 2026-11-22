@@ -6,6 +6,10 @@ description = "Battery % of wireless mice and keyboards in the Mac menu bar"
 license.workspace = true
 repository.workspace = true
 
+[lib]
+name = "juicebar_mac"
+path = "src/lib.rs"
+
 [[bin]]
 name = "JuiceBar"
 path = "src/main.rs"
@@ -17,3 +21,7 @@ juicebar-shared = { path = "../shared" }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+block2 = "0.6"
+dispatch2 = "0.3"
+hidapi = { version = "2.6", default-features = false }
+serde_json = "1"

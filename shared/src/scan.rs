@@ -119,3 +119,39 @@ pub fn build_device(device: &UsbDevice, reading: &Reading, protocol: Option<&'st
         product_id: device.product_id,
     }
 }
+
+/// One dongle with its menu row, so a row can be probed or reported later.
+#[derive(Clone, Debug)]
+pub struct ScannedDevice {
+    pub usb: UsbDevice,
+    pub device: Device,
+}
+
+/// Reads every plugged-in dongle and builds its row. `bluetooth_names` gives remembered names per kind.
+pub fn scan_dongles(api: &hidapi::HidApi, settings: &Settings, bluetooth_names: &dyn Fn(DeviceKind) -> Vec<String>) -> Vec<ScannedDevice> {
+    list_usb_devices(api)
+        .into_iter()
+        .map(|usb| {
+            let (reading, protocol) = read_usb_device(api, &usb);
+            let device = build_device(&usb, &reading, protocol, settings, &bluetooth_names(usb.kind()));
+            ScannedDevice { usb, device }
+        })
+        .filter(|scanned| !settings.hidden.contains(&scanned.device.id))
+        .collect()
+}
+
+/// Tries every protocol's battery read on the device's vendor interfaces. Runs only when the user clicks Try to detect.
+pub fn probe_usb_device(api: &hidapi::HidApi, device: &UsbDevice) -> (Reading, Option<&'static str>) {
+    for protocol in crate::protocols::all_protocols() {
+        for (_, path) in device.interfaces.iter().filter(|(summary, _)| summary.usage_page == protocol.usage_page()) {
+            let Ok(opened) = api.open_path(path) else {
+                continue;
+            };
+            let mut transport = HidapiTransport { device: opened };
+            if let Ok(Reading::Battery(battery)) = protocol.read_battery(&mut transport) {
+                return (Reading::Battery(battery), Some(protocol.id()));
+            }
+        }
+    }
+    (Reading::NoAnswer, None)
+}

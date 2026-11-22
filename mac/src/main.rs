@@ -1,3 +1,9 @@
+//! Starts Juice Bar.
+
+#[cfg(target_os = "macos")]
 fn main() {
-    // Placeholder until the Mac UI lands.
+    juicebar_mac::app::run();
 }
+
+#[cfg(not(target_os = "macos"))]
+fn main() {}
