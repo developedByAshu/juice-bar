@@ -26,6 +26,8 @@ struct App {
     scanned: Vec<ScannedDevice>,
     bluetooth: Vec<BluetoothEntry>,
     devices: Vec<Device>,
+    /// The rows in the menu, in menu order; a row's tag is its index here.
+    shown: Vec<Device>,
     poll_timer: Option<Retained<NSTimer>>,
     is_scanning: bool,
 }
@@ -57,7 +59,7 @@ pub fn finish_startup() {
     let settings = Settings::load();
     let poll_timer = Some(start_timer(f64::from(settings.poll_minutes) * 60.0, sel!(poll:), true));
     APP.with(|cell| {
-        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), poll_timer, is_scanning: false });
+        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false });
     });
     watch_system_events();
     refresh();
@@ -104,7 +106,7 @@ fn rebuild(app: &mut App) {
         app.devices = sample_devices(82, 15);
     } else {
         let mut rows: Vec<Device> = app.scanned.iter().map(|scanned| scanned.device.clone()).collect();
-        rows.extend(bluetooth_devices(&app.bluetooth).into_iter().filter(|device| !app.settings.hidden.contains(&device.id)));
+        rows.extend(bluetooth_devices(&app.bluetooth));
         for row in &mut rows {
             if let Some(name) = app.settings.renames.get(&row.id) {
                 row.name = name.clone();
@@ -112,8 +114,11 @@ fn rebuild(app: &mut App) {
         }
         app.devices = rows;
     }
-    status_icon::update_status_icon(&app.status_item, icon_tone(&app.devices), lowest_percent(&app.devices), app.settings.shows_percent_in_icon);
-    menu_ui::show_menu(&app.menu, &app.devices);
+    // Settings lists every device; the icon and menu leave out the hidden ones.
+    let shown: Vec<Device> = app.devices.iter().filter(|device| !app.settings.hidden.contains(&device.id)).cloned().collect();
+    status_icon::update_status_icon(&app.status_item, icon_tone(&shown), lowest_percent(&shown), app.settings.shows_percent_in_icon);
+    menu_ui::show_menu(&app.menu, &shown);
+    app.shown = shown;
     crate::settings_ui::on_devices_changed(&app.settings, &app.devices);
 }
 
@@ -215,15 +220,21 @@ pub fn redraw_icon() {
 
 /// Runs the opt-in probe on one unknown dongle.
 pub fn probe(tag: isize) {
-    if let Some((usb, settings, bluetooth)) = with_app(|app| app.scanned.get(tag as usize).map(|scanned| (scanned.usb.clone(), app.settings.clone(), app.bluetooth.clone()))).flatten() {
-        send_hid_job(HidJob::Probe { tag, usb, settings, bluetooth });
+    let job = with_app(|app| {
+        let id = &app.shown.get(tag as usize)?.id;
+        let index = app.scanned.iter().position(|scanned| &scanned.device.id == id)?;
+        Some(HidJob::Probe { tag: index as isize, usb: app.scanned[index].usb.clone(), settings: app.settings.clone(), bluetooth: app.bluetooth.clone() })
+    })
+    .flatten();
+    if let Some(job) = job {
+        send_hid_job(job);
     }
 }
 
 /// Returns the Report link for the device behind a row.
 pub fn report_url_for(tag: isize) -> Option<String> {
     with_app(|app| {
-        let device = app.devices.get(tag as usize)?;
+        let device = app.shown.get(tag as usize)?;
         let interfaces: Vec<_> = app.scanned.iter().find(|scanned| scanned.device.id == device.id).map(|scanned| scanned.usb.interfaces.iter().map(|(summary, _)| summary.clone()).collect()).unwrap_or_default();
         let os = format!("macOS {}", objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersionString());
         Some(report_url(device, &interfaces, &os, juicebar_shared::APP_VERSION))

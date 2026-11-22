@@ -127,7 +127,8 @@ pub struct ScannedDevice {
     pub device: Device,
 }
 
-/// Reads every plugged-in dongle and builds its row. `bluetooth_names` gives remembered names per kind.
+/// Reads every plugged-in dongle and builds its row, hidden ones included (Settings lists them to unhide;
+/// the menu and icon filter them). `bluetooth_names` gives remembered names per kind.
 pub fn scan_dongles(api: &hidapi::HidApi, settings: &Settings, bluetooth_names: &dyn Fn(DeviceKind) -> Vec<String>) -> Vec<ScannedDevice> {
     list_usb_devices(api)
         .into_iter()
@@ -136,7 +137,6 @@ pub fn scan_dongles(api: &hidapi::HidApi, settings: &Settings, bluetooth_names: 
             let device = build_device(&usb, &reading, protocol, settings, &bluetooth_names(usb.kind()));
             ScannedDevice { usb, device }
         })
-        .filter(|scanned| !settings.hidden.contains(&scanned.device.id))
         .collect()
 }
 
