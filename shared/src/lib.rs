@@ -4,6 +4,7 @@
 pub mod catalog;
 pub mod demo;
 pub mod device;
+pub mod glyph;
 pub mod names;
 pub mod protocols;
 pub mod report;

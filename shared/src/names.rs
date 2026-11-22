@@ -31,14 +31,15 @@ pub fn resolve_name(kind: DeviceKind, candidates: &NameCandidates) -> (String, N
     if let Some(name) = clean(&candidates.device_reported) {
         return (name, NameSource::DeviceReported);
     }
-    // One remembered Bluetooth device of the same kind is a confident match; several are not.
-    if let [only] = candidates.bluetooth_memory.as_slice() {
-        return (only.trim().to_string(), NameSource::BluetoothMemory);
-    }
+    // An exact catalog name beats a guess by kind; a brand-shared chip's family name never shows.
     if let Some((name, brand_shared)) = &candidates.catalog {
         if !brand_shared {
             return (name.clone(), NameSource::Catalog);
         }
+    }
+    // One remembered Bluetooth device of the same kind is a confident match; several are not.
+    if let [only] = candidates.bluetooth_memory.as_slice() {
+        return (only.trim().to_string(), NameSource::BluetoothMemory);
     }
     if let Some(name) = clean(&candidates.usb_product).filter(|name| !is_generic_usb_name(name)) {
         return (name, NameSource::UsbProduct);

@@ -7,7 +7,7 @@ use crate::{menu_ui, status_icon};
 use juicebar_shared::demo::{is_demo_mode, sample_devices};
 use juicebar_shared::device::Device;
 use juicebar_shared::report::report_url;
-use juicebar_shared::scan::{build_device, probe_usb_device, scan_dongles, ScannedDevice};
+use juicebar_shared::scan::{build_device, probe_usb_device, scan_dongles, ScannedDevice, UsbDevice};
 use juicebar_shared::settings::Settings;
 use juicebar_shared::tone::{icon_tone, lowest_percent};
 use objc2::rc::Retained;
@@ -16,6 +16,7 @@ use objc2::sel;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSMenu, NSStatusItem};
 use objc2_foundation::NSTimer;
 use std::cell::RefCell;
+use std::sync::mpsc::{channel, Sender};
 
 /// Everything kept between scans.
 struct App {
@@ -60,6 +61,38 @@ pub fn finish_startup() {
     });
     watch_system_events();
     refresh();
+    start_capture_if_asked();
+}
+
+/// Capture mode for screenshots without touching the mouse: JUICEBAR_CAPTURE=menu or settings
+/// opens that view after the first scan and quits a few seconds later.
+fn start_capture_if_asked() {
+    match std::env::var("JUICEBAR_CAPTURE").as_deref() {
+        Ok("menu") => {
+            start_timer(3.0, sel!(captureOpenMenu:), false);
+            start_timer(9.0, sel!(captureFinish:), false);
+        }
+        Ok("settings") => {
+            crate::settings_ui::open_settings();
+            start_timer(8.0, sel!(captureFinish:), false);
+        }
+        _ => {}
+    }
+}
+
+/// Opens the menu under the item without any click. Used only by capture mode.
+pub fn capture_open_menu() {
+    let Some((item, menu)) = with_app(|app| (app.status_item.clone(), app.menu.clone())) else {
+        return;
+    };
+    #[allow(deprecated)]
+    item.popUpStatusItemMenu(&menu);
+}
+
+/// Closes an open menu and quits. Used only by capture mode.
+pub fn capture_finish() {
+    with_app(|app| app.menu.cancelTracking());
+    NSApplication::sharedApplication(main_thread()).terminate(None);
 }
 
 /// Rebuilds the visible rows from the last scan, then redraws the icon and an open menu.
@@ -80,7 +113,69 @@ fn rebuild(app: &mut App) {
     menu_ui::show_menu(&app.menu, &app.devices);
 }
 
-/// Starts a background scan of dongles and Bluetooth, unless one is running.
+/// Work for the HID thread.
+enum HidJob {
+    Scan(Settings),
+    Probe { tag: isize, usb: UsbDevice, settings: Settings, bluetooth: Vec<BluetoothEntry> },
+}
+
+thread_local! {
+    static HID_JOBS: RefCell<Option<Sender<HidJob>>> = const { RefCell::new(None) };
+}
+
+/// Starts the one thread that owns the HID manager. macOS ties hidapi's global manager to the run loop
+/// of the thread that created it, so every scan must run on that same thread.
+fn start_hid_thread() -> Sender<HidJob> {
+    let (sender, receiver) = channel::<HidJob>();
+    std::thread::spawn(move || {
+        let mut api = hidapi::HidApi::new().ok();
+        for job in receiver {
+            if let Some(api) = api.as_mut() {
+                let _ = api.refresh_devices();
+            }
+            match job {
+                HidJob::Scan(settings) => {
+                    let bluetooth = read_bluetooth_entries();
+                    let scanned = api.as_ref().map_or_else(Vec::new, |api| scan_dongles(api, &settings, &|kind| remembered_bluetooth_names(&bluetooth, kind)));
+                    dispatch2::DispatchQueue::main().exec_async(move || {
+                        with_app(|app| {
+                            app.scanned = scanned;
+                            app.bluetooth = bluetooth;
+                            app.is_scanning = false;
+                            rebuild(app);
+                        });
+                    });
+                }
+                HidJob::Probe { tag, usb, settings, bluetooth } => {
+                    let Some(api) = api.as_ref() else {
+                        continue;
+                    };
+                    let (reading, protocol) = probe_usb_device(api, &usb);
+                    let device = build_device(&usb, &reading, protocol, &settings, &remembered_bluetooth_names(&bluetooth, usb.kind()));
+                    dispatch2::DispatchQueue::main().exec_async(move || {
+                        with_app(|app| {
+                            if let Some(scanned) = app.scanned.get_mut(tag as usize) {
+                                scanned.device = device;
+                            }
+                            rebuild(app);
+                        });
+                    });
+                }
+            }
+        }
+    });
+    sender
+}
+
+fn send_hid_job(job: HidJob) {
+    HID_JOBS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        let sender = slot.get_or_insert_with(start_hid_thread);
+        let _ = sender.send(job);
+    });
+}
+
+/// Asks the HID thread for a fresh scan of dongles and Bluetooth, unless one is running.
 pub fn refresh() {
     let Some(settings) = with_app(|app| {
         if app.is_scanning || is_demo_mode() {
@@ -93,18 +188,7 @@ pub fn refresh() {
     .flatten() else {
         return;
     };
-    std::thread::spawn(move || {
-        let bluetooth = read_bluetooth_entries();
-        let scanned = hidapi::HidApi::new().map_or_else(|_| Vec::new(), |api| scan_dongles(&api, &settings, &|kind| remembered_bluetooth_names(&bluetooth, kind)));
-        dispatch2::DispatchQueue::main().exec_async(move || {
-            with_app(|app| {
-                app.scanned = scanned;
-                app.bluetooth = bluetooth;
-                app.is_scanning = false;
-                rebuild(app);
-            });
-        });
-    });
+    send_hid_job(HidJob::Scan(settings));
 }
 
 /// Shows the last known rows at once and asks for fresh ones; an open menu updates in place.
@@ -120,24 +204,9 @@ pub fn redraw_icon() {
 
 /// Runs the opt-in probe on one unknown dongle.
 pub fn probe(tag: isize) {
-    let Some((usb, settings, bluetooth)) = with_app(|app| app.scanned.get(tag as usize).map(|scanned| (scanned.usb.clone(), app.settings.clone(), app.bluetooth.clone()))).flatten() else {
-        return;
-    };
-    std::thread::spawn(move || {
-        let Ok(api) = hidapi::HidApi::new() else {
-            return;
-        };
-        let (reading, protocol) = probe_usb_device(&api, &usb);
-        let device = build_device(&usb, &reading, protocol, &settings, &remembered_bluetooth_names(&bluetooth, usb.kind()));
-        dispatch2::DispatchQueue::main().exec_async(move || {
-            with_app(|app| {
-                if let Some(scanned) = app.scanned.get_mut(tag as usize) {
-                    scanned.device = device;
-                }
-                rebuild(app);
-            });
-        });
-    });
+    if let Some((usb, settings, bluetooth)) = with_app(|app| app.scanned.get(tag as usize).map(|scanned| (scanned.usb.clone(), app.settings.clone(), app.bluetooth.clone()))).flatten() {
+        send_hid_job(HidJob::Probe { tag, usb, settings, bluetooth });
+    }
 }
 
 /// Returns the Report link for the device behind a row.

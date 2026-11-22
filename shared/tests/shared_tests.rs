@@ -61,6 +61,23 @@ fn names_never_show_a_brand_shared_family_name() {
 }
 
 #[test]
+fn exact_catalog_name_beats_a_bluetooth_guess() {
+    let keyboard = NameCandidates { catalog: Some(("Kreo Swarm 75".into(), false)), bluetooth_memory: vec!["Kreo Swarm 5.0".into()], ..Default::default() };
+    assert_eq!(resolve_name(DeviceKind::Keyboard, &keyboard), ("Kreo Swarm 75".to_string(), NameSource::Catalog));
+}
+
+#[test]
+fn glyph_juice_rises_with_the_level_and_stays_inside_the_glass() {
+    use juicebar_shared::glyph::{juice_polygon, glyph_svg};
+    assert!(juice_polygon(None).is_none());
+    let low = juice_polygon(Some(10)).unwrap();
+    let high = juice_polygon(Some(100)).unwrap();
+    assert!(high[2].1 > low[2].1);
+    assert!(high[3].0 > 1.6 && high[2].0 < 12.4 && high[2].1 < 15.2);
+    assert!(glyph_svg(Some(50), "#34C759").contains("stroke=\"currentColor\""));
+}
+
+#[test]
 fn settings_survive_a_round_trip_and_skip_broken_lines() {
     let mut settings = Settings { poll_minutes: 10, shows_percent_in_icon: true, is_saved_to_disk: false, ..Settings::default() };
     settings.renames.insert("3554:fa09:".into(), "Desk keyboard".into());

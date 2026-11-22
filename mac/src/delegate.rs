@@ -88,6 +88,16 @@ define_class!(
             settings_ui::on_reset_clicked();
         }
 
+        #[unsafe(method(captureOpenMenu:))]
+        fn capture_open_menu(&self, _timer: &NSTimer) {
+            app::capture_open_menu();
+        }
+
+        #[unsafe(method(captureFinish:))]
+        fn capture_finish(&self, _timer: &NSTimer) {
+            app::capture_finish();
+        }
+
         #[unsafe(method(hideResetNote:))]
         fn hide_reset_note(&self, _timer: &NSTimer) {
             settings_ui::hide_reset_note();

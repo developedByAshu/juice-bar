@@ -15,8 +15,8 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSDictionary, NSMutableAttributedString, NSRange, NSString};
 
 /// Where the connection label and the % end, in points from the row's text start.
-const CONNECTION_TAB: f64 = 200.0;
-const PERCENT_TAB: f64 = 256.0;
+const CONNECTION_TAB: f64 = 210.0;
+const PERCENT_TAB: f64 = 310.0;
 
 /// Returns the connection label shown in each row.
 pub fn connection_label(connection: Connection) -> &'static str {
