@@ -99,12 +99,15 @@ pub fn kind_of(paired: &PairedDevice, collections: &Collections) -> DeviceKind {
 
 /// Builds the menu row for a connected paired device. The OS-read battery counts as device reported.
 pub fn paired_to_device(paired: &PairedDevice, kind: DeviceKind, collections: &Collections) -> Device {
+    // An exact catalog name beats the Bluetooth name, unless other brands share the ids.
+    let catalog = find_by_ids(collections.vendor_id, collections.product_id).filter(|known| !known.brand_shared);
+    let (name, name_source) = catalog.map_or_else(|| (paired.name.clone(), NameSource::DeviceReported), |known| (known.family_name.to_string(), NameSource::Catalog));
     Device {
         id: format!("bt:{}", paired.address.to_lowercase()),
         kind,
         connection: Connection::Bluetooth,
-        name: paired.name.clone(),
-        name_source: NameSource::DeviceReported,
+        name,
+        name_source,
         battery: paired.battery.map(|percent| Battery { percent: percent.min(100), is_charging: false }),
         protocol: Some("bluetooth"),
         vendor_id: collections.vendor_id,

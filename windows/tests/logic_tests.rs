@@ -211,4 +211,13 @@ mod bluetooth {
         assert!(!device.is_unrecognised());
         assert!(device.counts_for_icon());
     }
+
+    #[test]
+    fn catalog_name_wins_unless_the_ids_are_brand_shared() {
+        let keyboard = Collections { mice: 1, keyboards: 2, vendor_id: 0x3554, product_id: 0xFA07 };
+        let named = paired_to_device(&PairedDevice { name: "Kreo Swarm 5.0".into(), ..paired(None) }, DeviceKind::Keyboard, &keyboard);
+        assert_eq!(named.name, "Kreo Swarm 75");
+        let mouse = Collections { mice: 1, keyboards: 1, vendor_id: 0x04F3, product_id: 0x026D };
+        assert_eq!(paired_to_device(&paired(None), DeviceKind::Mouse, &mouse).name, "XS Flow+2");
+    }
 }
