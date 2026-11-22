@@ -22,3 +22,10 @@ Each line: what was decided and why. Anything here can be reversed in the mornin
 | 16 | One long-lived HID thread owns hidapi | hidapi on macOS crashed when a second thread created it; also cheaper than a thread per scan |
 | 17 | Bluetooth names and battery from `system_profiler -json`, off the main thread, on scan only | No private APIs; zero cost between scans (measured 0.0% CPU idle) |
 | 18 | Input Monitoring is requested only when a dongle that needs it is plugged in | Most users never see the prompt; his mouse dongle needs it |
+| 19 | Windows flyout is our own window with Acrylic (DWM transient backdrop), not a native popup menu | A native menu cannot hold right-aligned coloured %, a bolt, or Report and Try to detect buttons in one row; Windows 11's own tray flyouts use Acrylic too. Without transparency effects, in high contrast or before Windows 11 22H2 it paints solid |
+| 20 | Windows quit shortcut shown as Ctrl+Q, settings as Ctrl+, | Windows has no system quit key; Alt+F4 would only close the flyout. Both work while the flyout has focus |
+| 21 | Windows accent comes from AccentPalette (light shade in dark mode, dark shade in light mode) | That is the shade Windows Settings draws toggles with; the raw AccentColor looked wrong next to it |
+| 22 | Windows "% in icon" draws the bold number in the tone instead of the glass | Two or three digits do not fit inside a 16 px glass and stay readable |
+| 23 | Windows reads hidden devices too (scan with hidden cleared), and filters them only in the menu and icon | `scan_dongles` drops hidden ids, but Settings must list them to turn them back on |
+| 24 | Reset in Settings resets the saved choices but leaves Launch at login alone | Launch at login is the startup list, not a saved choice; the confirm card says so |
+| 25 | Windows .ico built from shared/assets/juicebar.png by windows/tools/make_icon.ps1 | No Pillow on the Windows machine; .NET drawing gives the same resize, so one master PNG still feeds both icons |
