@@ -144,6 +144,9 @@ pub fn open_settings() {
     window.setTitle(&NSString::from_str("Juice Bar Settings"));
     let (content, reset_note) = build_content(&settings, &devices);
     window.setContentView(Some(&content));
+    content.layoutSubtreeIfNeeded();
+    let fitting = content.fittingSize();
+    window.setContentSize(NSSize::new(WINDOW_WIDTH.max(fitting.width), fitting.height));
     window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate())));
     window.center();
     window.makeKeyAndOrderFront(None);
@@ -222,5 +225,53 @@ pub fn hide_reset_note() {
         if let Some(open) = cell.borrow().as_ref() {
             open.reset_note.setStringValue(&NSString::from_str(""));
         }
+    });
+}
+
+/// Paints the settings window's content to a PNG without the screen. Used only by capture mode.
+pub fn capture_to(path: &str) -> bool {
+    WINDOW.with(|cell| {
+        let state = cell.borrow();
+        let Some(open) = state.as_ref() else {
+            return false;
+        };
+        let Some(view) = open.window.contentView() else {
+            return false;
+        };
+        // A transparent capture of dark-mode text looks blank, so captures use the light look.
+        let light = objc2_app_kit::NSAppearance::appearanceNamed(unsafe { objc2_app_kit::NSAppearanceNameAqua });
+        objc2_app_kit::NSAppearanceCustomization::setAppearance(&*open.window, light.as_deref());
+        view.layoutSubtreeIfNeeded();
+        view.displayIfNeeded();
+        let bounds = view.bounds();
+        let Some(image) = view.bitmapImageRepForCachingDisplayInRect(bounds) else {
+            return false;
+        };
+        view.cacheDisplayInRect_toBitmapImageRep(bounds, &image);
+        let no_options = objc2_foundation::NSDictionary::new();
+        // SAFETY: an empty dictionary is valid for the PNG options.
+        let data = unsafe { image.representationUsingType_properties(objc2_app_kit::NSBitmapImageFileType::PNG, &no_options) };
+        data.is_some_and(|data| data.writeToFile_atomically(&NSString::from_str(path), true))
+    })
+}
+
+/// Rebuilds an open window when the set of devices changed, so new devices appear without reopening.
+pub fn on_devices_changed(settings: &Settings, devices: &[Device]) {
+    WINDOW.with(|cell| {
+        let mut state = cell.borrow_mut();
+        let Some(open) = state.as_mut() else {
+            return;
+        };
+        let same = open.devices.len() == devices.len() && open.devices.iter().zip(devices).all(|(old, new)| old.id == new.id);
+        if same {
+            return;
+        }
+        let (content, note) = build_content(settings, devices);
+        open.window.setContentView(Some(&content));
+        content.layoutSubtreeIfNeeded();
+        let fitting = content.fittingSize();
+        open.window.setContentSize(NSSize::new(WINDOW_WIDTH.max(fitting.width), fitting.height));
+        open.devices = devices.to_vec();
+        open.reset_note = note;
     });
 }

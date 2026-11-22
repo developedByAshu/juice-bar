@@ -74,7 +74,7 @@ fn start_capture_if_asked() {
         }
         Ok("settings") => {
             crate::settings_ui::open_settings();
-            start_timer(8.0, sel!(captureFinish:), false);
+            start_timer(4.0, sel!(captureFinish:), false);
         }
         _ => {}
     }
@@ -91,6 +91,9 @@ pub fn capture_open_menu() {
 
 /// Closes an open menu and quits. Used only by capture mode.
 pub fn capture_finish() {
+    if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_PATH") {
+        crate::settings_ui::capture_to(&path);
+    }
     with_app(|app| app.menu.cancelTracking());
     NSApplication::sharedApplication(main_thread()).terminate(None);
 }
@@ -111,6 +114,7 @@ fn rebuild(app: &mut App) {
     }
     status_icon::update_status_icon(&app.status_item, icon_tone(&app.devices), lowest_percent(&app.devices), app.settings.shows_percent_in_icon);
     menu_ui::show_menu(&app.menu, &app.devices);
+    crate::settings_ui::on_devices_changed(&app.settings, &app.devices);
 }
 
 /// Work for the HID thread.
