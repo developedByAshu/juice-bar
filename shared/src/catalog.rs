@@ -41,6 +41,9 @@ pub const CATALOG: &[KnownDevice] = &[
     entry(0x258A, 0x010C, 0xFF00, "bytech", DeviceKind::Keyboard, "Kreo Swarm 75", false, false),
     entry(0x04F3, 0x026F, 0x000A, "yuandaxin", DeviceKind::Mouse, "Yuandaxin wireless mouse", true, true),
     entry(0x04F3, 0x026E, 0x000A, "yuandaxin", DeviceKind::Mouse, "Yuandaxin mouse", true, false),
+    // The same devices over Bluetooth, read through the OS (ids seen on Windows, 23 Nov 2026).
+    entry(0x3554, 0xFA07, 0x0000, "bluetooth", DeviceKind::Keyboard, "Kreo Swarm 75", false, true),
+    entry(0x04F3, 0x026D, 0x0000, "bluetooth", DeviceKind::Mouse, "Yuandaxin wireless mouse", true, true),
 ];
 
 /// Returns the catalog entry for a HID interface, if any.
