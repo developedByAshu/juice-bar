@@ -17,7 +17,7 @@ use juicebar_shared::settings::{Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
-use objc2_app_kit::{NSApplication, NSControl, NSFocusRingType, NSTextField, NSWindow};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSControl, NSFocusRingType, NSTextField, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
 
@@ -942,9 +942,31 @@ pub fn open_settings() {
     };
     let window = build(settings, devices);
     window.center();
+    sync_dock_entry();
     window.makeKeyAndOrderFront(None);
     // macOS can refuse the activation above, and a window asked to come forward then stays hidden.
     window.orderFrontRegardless();
+}
+
+/**
+ * Puts the app in the Dock while Settings is open, so it can be found again, and takes it out when the
+ * window closes. The menu bar item keeps running until the user quits. Copied from NetSpeedGauge.
+ */
+fn sync_dock_entry() {
+    let application = NSApplication::sharedApplication(main_thread());
+    let is_open = WINDOW.with(|cell| cell.try_borrow().map(|state| state.is_some()).unwrap_or(false));
+    let wanted = if is_open { NSApplicationActivationPolicy::Regular } else { NSApplicationActivationPolicy::Accessory };
+    if application.activationPolicy() == wanted {
+        return;
+    }
+    application.setActivationPolicy(wanted);
+    if wanted == NSApplicationActivationPolicy::Accessory {
+        application.deactivate();
+    } else {
+        // Changing to having a Dock entry drops the focus the new window has just asked for.
+        // SAFETY: the selector exists on every macOS version.
+        let _: () = unsafe { objc2::msg_send![&*application, activateIgnoringOtherApps: true] };
+    }
 }
 
 /// Forgets the window once it closes, so the next open shows fresh rows. A rename being typed is kept.
@@ -957,6 +979,7 @@ pub fn on_closed() {
         }
         drop(state);
     }
+    sync_dock_entry();
 }
 
 /// Hides the reset done cue a few seconds after a reset.
