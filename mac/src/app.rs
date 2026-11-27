@@ -197,6 +197,11 @@ fn start_hid_thread() -> Sender<HidJob> {
     let (sender, receiver) = channel::<HidJob>();
     std::thread::spawn(move || {
         let mut api = hidapi::HidApi::new().ok();
+        // Shared, as browsers open devices: macOS refuses an exclusive open of a mouse to a normal app
+        // (privilege violation), which hid the XS Flow mouse's battery report.
+        if let Some(api) = api.as_ref() {
+            api.set_open_exclusive(false);
+        }
         for job in receiver {
             if let Some(api) = api.as_mut() {
                 let _ = api.refresh_devices();

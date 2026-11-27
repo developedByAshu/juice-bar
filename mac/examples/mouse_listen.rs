@@ -4,6 +4,8 @@
 #[cfg(target_os = "macos")]
 fn main() {
     let api = hidapi::HidApi::new().expect("hidapi");
+    // Shared, as browsers open it: macOS refuses an exclusive open of a mouse to a normal app.
+    api.set_open_exclusive(false);
     let Some(info) = api.device_list().find(|info| info.vendor_id() == 0x04F3 && info.product_id() == 0x026F && info.usage_page() == 0x000A && info.usage() == 0) else {
         println!("mouse dongle input interface not found");
         return;
