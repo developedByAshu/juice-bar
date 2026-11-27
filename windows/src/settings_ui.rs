@@ -59,8 +59,6 @@ const DISABLED_TEXT: f32 = 0.5;
 // Devices rows start their name after the battery dot.
 const DEVICE_TEXT_LEFT: i32 = 30;
 const EDIT_SUBCLASS: usize = 1;
-const REPO_URL: &str = "https://github.com/developedByAshu/juice-bar";
-const LICENSE_URL: &str = "https://github.com/developedByAshu/juice-bar/blob/main/LICENSE";
 const ICON_GENERAL: &str = "\u{E713}";
 const ICON_DEVICES: &str = "\u{E772}";
 const ICON_ABOUT: &str = "\u{E946}";
@@ -109,7 +107,6 @@ enum Control {
     Rename(usize),
     ShowToggle(usize),
     ConfirmName(usize),
-    Link(&'static str),
 }
 
 /// One row of the General page.
@@ -133,7 +130,6 @@ enum Block {
     AboutCard,
     Privacy,
     Developer,
-    Link { label: &'static str, hint: &'static str, url: &'static str },
 }
 
 struct Fonts {
@@ -243,9 +239,6 @@ fn page_blocks(state: &Window) -> Vec<Block> {
             Block::Privacy,
             Block::Section("Know your developer"),
             Block::Developer,
-            Block::Section("Links"),
-            Block::Link { label: "Source code", hint: "github.com/developedByAshu/juice-bar", url: REPO_URL },
-            Block::Link { label: "Licence", hint: "GPL-3.0, free and open source", url: LICENSE_URL },
         ],
     }
 }
@@ -339,7 +332,6 @@ fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
                     controls.push((Control::ConfirmName(index), button_rect(canvas, state.fonts.body, "Keep this name", rename.left - scale(8, dpi), top, dpi)));
                 }
             }
-            Block::Link { url, .. } => controls.push((Control::Link(url), button_rect(canvas, state.fonts.body, "Open", right, top, dpi))),
             _ => {}
         }
     }
@@ -608,13 +600,6 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                 row_card(canvas, &theme, left, top, width, row_height, dpi);
                 row_label(canvas, state, text_x, top, DEVELOPER_NAME, DEVELOPER_ORIGIN, width - scale(28, dpi));
             }
-            Block::Link { label, hint, url } => {
-                row_card(canvas, &theme, left, top, width, row_height, dpi);
-                row_label(canvas, state, text_x, top, label, hint, width - scale(120, dpi));
-                if let Some(rect) = rect_of(Control::Link(url)) {
-                    draw_button(canvas, state, &rect, "Open", Control::Link(url), false);
-                }
-            }
         }
     }
 }
@@ -733,7 +718,6 @@ fn activate(control: Control) {
                 });
             }
         }
-        Control::Link(url) => crate::app::open_url(url),
     }
     invalidate();
 }
