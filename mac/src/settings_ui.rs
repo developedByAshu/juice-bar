@@ -43,7 +43,6 @@ const NAV_ROW: i32 = 40;
 // Space each side of a segment's text. The system font runs wider than Windows', so this is tighter than there.
 const SEGMENT_PADDING: i32 = 8;
 const TOGGLE_WIDTH: i32 = 40;
-const FIELD_WIDTH: i32 = 160;
 const FIELD_HEIGHT: i32 = 30;
 const FIELD_GAP: i32 = 16;
 // The real text box sits inside the drawn box, inset so its text lines up with the row's own text.
@@ -58,7 +57,12 @@ const ICON_MINUS: &str = "minus";
 const ICON_PLUS: &str = "plus";
 const DISABLED_FILL: f32 = 0.35;
 const DISABLED_TEXT: f32 = 0.5;
-const RENAME_KEYS: &str = "Return to save \u{b7} Esc to cancel";
+// The rename controls: a pencil on an idle row; a field with ✓ and ✕ while that row is being renamed.
+const ICON_PENCIL: &str = "pencil";
+const ICON_SAVE: &str = "checkmark";
+const ICON_CANCEL: &str = "xmark";
+const EDIT_BUTTON: i32 = 26;
+const EDIT_BUTTON_GAP: i32 = 4;
 const RENAME_SAVED: &str = "Saved";
 const RENAME_SAVED_SECONDS: f64 = 2.0;
 const ICON_CHECK: &str = "checkmark";
@@ -121,7 +125,7 @@ const GENERAL_ROWS: &[Row] = &[Row::Section("Startup"), Row::LaunchAtLogin, Row:
 const APPEARANCE_ROWS: &[Row] = &[Row::Section("Menu bar icon"), Row::ShowPercent, Row::Section("Menu"), Row::MenuTextSize];
 const DEVICES_ROWS: &[Row] = &[
     Row::Section("Your devices"),
-    Row::Note("Type a name to change how a device shows in the menu.\nSwitch a device off to leave it out of the menu and the icon."),
+    Row::Note("Click the pencil to give a device a name you will recognise.\nSwitch a device off to leave it out of the menu and the icon."),
     Row::DeviceList,
 ];
 const ADVANCED_ROWS: &[Row] = &[Row::Section("Behaviour"), Row::OnHover, Row::OnClick, Row::Section("Reset"), Row::ResetAll];
@@ -148,6 +152,9 @@ enum Action {
     SetHover(u8),
     SetClick(u8),
     ToggleShown(usize),
+    EditName(usize),
+    SaveName(usize),
+    CancelName,
     AskReset,
     CancelReset,
     ConfirmReset,
@@ -190,8 +197,11 @@ impl Fonts {
 /// What a click asks for once the WINDOW borrow is dropped.
 #[derive(Default)]
 struct Effects {
+    /// A row to start renaming: its field gets the name, all selected.
+    begins_edit: Option<usize>,
+    /// A row whose field to save, read once the borrow is dropped.
+    saves_edit: Option<usize>,
     apply: Option<Settings>,
-    sync_fields: bool,
     layout: bool,
     starts_done_timer: bool,
 }
@@ -214,8 +224,8 @@ struct SettingsWindow {
     is_confirming_reset: bool,
     is_reset_done: bool,
     done_timer: Option<Retained<NSTimer>>,
-    /// Per rename box, text typed but not saved yet; None when the box matches the saved name.
-    unsaved: Vec<Option<String>>,
+    /// The one row being renamed, if any. Only ✓ or Return saves it; anything else cancels it.
+    editing: Option<usize>,
     /// The row whose hint shows "Saved" for a moment after its rename was saved.
     saved_row: Option<usize>,
     saved_timer: Option<Retained<NSTimer>>,
@@ -295,7 +305,17 @@ impl SettingsWindow {
         }
     }
 
-    /// Returns where each rename box goes, or None when it must be hidden: another page, under the header, or behind the confirm card.
+    /// Returns where the rename controls sit on a device row: (field left, field width, ✓ left, ✕ or pencil left).
+    fn edit_geometry(left: i32, width: i32) -> (i32, i32, i32, i32) {
+        let toggle_left = left + width - 14 - TOGGLE_WIDTH;
+        let cancel_x = toggle_left - FIELD_GAP - EDIT_BUTTON;
+        let save_x = cancel_x - EDIT_BUTTON_GAP - EDIT_BUTTON;
+        let field_x = left + 8;
+        (field_x, save_x - 8 - field_x, save_x, cancel_x)
+    }
+
+    /// Returns where each rename box goes, or None when it must be hidden: every box but the one being
+    /// renamed, and that one on another page, under the header, or behind the confirm card.
     fn field_frames(&self) -> Vec<Option<NSRect>> {
         let mut frames = vec![None; self.fields.len()];
         if self.page != DEVICES_PAGE || self.is_confirming_reset {
@@ -308,8 +328,11 @@ impl SettingsWindow {
             }
             y += self.row_height(*row);
         }
-        let box_x = content_left() + content_width() - 14 - TOGGLE_WIDTH - FIELD_GAP - FIELD_WIDTH;
+        let (box_x, box_width, _, _) = Self::edit_geometry(content_left(), content_width());
         for (index, frame) in frames.iter_mut().enumerate() {
+            if self.editing != Some(index) {
+                continue;
+            }
             let box_y = y + index as i32 * (ROW_HEIGHT + ROW_GAP) + (ROW_HEIGHT - FIELD_HEIGHT) / 2;
             if box_y < HEADER_HEIGHT || box_y + FIELD_HEIGHT > HEIGHT {
                 continue;
@@ -317,7 +340,7 @@ impl SettingsWindow {
             let text_y = box_y + (FIELD_HEIGHT - FIELD_TEXT_HEIGHT) / 2;
             *frame = Some(NSRect::new(
                 NSPoint::new(f64::from(box_x + FIELD_INSET_X), f64::from(text_y)),
-                NSSize::new(f64::from(FIELD_WIDTH - FIELD_INSET_X * 2), f64::from(FIELD_TEXT_HEIGHT)),
+                NSSize::new(f64::from(box_width - FIELD_INSET_X * 2), f64::from(FIELD_TEXT_HEIGHT)),
             ));
         }
         frames
@@ -328,7 +351,8 @@ impl SettingsWindow {
         self.field_frames().iter().flatten().any(|frame| {
             let left = frame.origin.x as i32 - FIELD_INSET_X;
             let top = frame.origin.y as i32 - (FIELD_HEIGHT - FIELD_TEXT_HEIGHT) / 2;
-            x >= left && x < left + FIELD_WIDTH && y >= top && y < top + FIELD_HEIGHT
+            let box_width = frame.size.width as i32 + FIELD_INSET_X * 2;
+            x >= left && x < left + box_width && y >= top && y < top + FIELD_HEIGHT
         })
     }
 
@@ -552,25 +576,43 @@ impl SettingsWindow {
             return;
         }
         let toggle_right = left + width - 14;
-        let box_x = toggle_right - TOGGLE_WIDTH - FIELD_GAP - FIELD_WIDTH;
-        let room = box_x - 12 - (left + 14);
+        let (field_x, field_width, save_x, cancel_x) = Self::edit_geometry(left, width);
+        let room = cancel_x - 12 - (left + 14);
         for (index, device) in self.devices.clone().iter().enumerate() {
             let row_y = y + index as i32 * (ROW_HEIGHT + ROW_GAP);
             self.row_card(left, row_y, width, ROW_HEIGHT);
-            // The name in use: the user's rename first, else the device's own. The full name when it
-            // fits, and the menu's shortened name only when it does not.
-            let in_use = self.settings.renames.get(&device.id).cloned().unwrap_or_else(|| device.name.clone());
-            let name = if canvas::text_width(&in_use, &self.fonts.body) <= room { in_use } else { short_name(&in_use) };
-            self.draw_device_label(left, row_y, index, &name, &device_hint(device));
-            canvas::round_rect(box_x, row_y + (ROW_HEIGHT - FIELD_HEIGHT) / 2, FIELD_WIDTH, FIELD_HEIGHT, CARD_RADIUS as f32, theme.segment_track_on_card);
+            let button_y = row_y + (ROW_HEIGHT - EDIT_BUTTON) / 2;
+            if self.editing == Some(index) {
+                // The name swaps for a field holding it, with ✓ to save and ✕ to cancel.
+                canvas::round_rect(field_x, row_y + (ROW_HEIGHT - FIELD_HEIGHT) / 2, field_width, FIELD_HEIGHT, CARD_RADIUS as f32, theme.segment_track_on_card);
+                self.draw_icon_button(save_x, button_y, ICON_SAVE, theme.accent, Action::SaveName(index));
+                self.draw_icon_button(cancel_x, button_y, ICON_CANCEL, theme.muted, Action::CancelName);
+            } else {
+                // The name in use: the user's rename first, else the device's own. The full name when it
+                // fits, and the menu's shortened name only when it does not.
+                let in_use = self.settings.renames.get(&device.id).cloned().unwrap_or_else(|| device.name.clone());
+                let name = if canvas::text_width(&in_use, &self.fonts.body) <= room { in_use } else { short_name(&in_use) };
+                self.draw_device_label(left, row_y, index, &name, &device_hint(device));
+                self.draw_icon_button(cancel_x, button_y, ICON_PENCIL, theme.muted, Action::EditName(index));
+            }
             let is_shown = !self.settings.hidden.contains(&device.id);
             self.draw_toggle(toggle_right, row_y, ROW_HEIGHT, is_shown);
             self.add_hit(toggle_right - TOGGLE_WIDTH - 8, row_y, TOGGLE_WIDTH + 22, ROW_HEIGHT, Action::ToggleShown(index));
         }
     }
 
-    /// Draws a device row's name and its second line: the details, "Return to save · Esc to cancel" while
-    /// its box has unsaved typing, or a green "Saved" for a moment after a save.
+    /// Draws a small round icon button: the symbol alone, with a soft fill under it on hover.
+    fn draw_icon_button(&mut self, x: i32, y: i32, icon: &str, color: u32, action: Action) {
+        let theme = self.theme;
+        if self.is_hover(action) {
+            canvas::round_rect(x, y, EDIT_BUTTON, EDIT_BUTTON, CARD_RADIUS as f32, theme.button_hover);
+        }
+        let ink = if self.is_hover(action) && color == theme.muted { theme.text } else { color };
+        canvas::symbol(x + EDIT_BUTTON / 2, y + EDIT_BUTTON / 2, icon, 9.0, ink);
+        self.add_hit(x, y, EDIT_BUTTON, EDIT_BUTTON, action);
+    }
+
+    /// Draws a device row's name and its second line: the details, or a green "Saved" for a moment after a save.
     fn draw_device_label(&self, left: i32, y: i32, index: usize, name: &str, details: &str) {
         let theme = self.theme;
         let x = left + 14;
@@ -578,8 +620,6 @@ impl SettingsWindow {
         if self.saved_row == Some(index) {
             canvas::symbol(x + 6, y + 27 + self.fonts.small.box_height / 2, ICON_DONE, 8.0, theme.good);
             canvas::text(x + 16, y + 27, RENAME_SAVED, &self.fonts.small, theme.good, Align::Left);
-        } else if self.unsaved.get(index).is_some_and(Option::is_some) {
-            canvas::text(x, y + 27, RENAME_KEYS, &self.fonts.small, theme.muted, Align::Left);
         } else {
             canvas::text(x, y + 27, details, &self.fonts.small, theme.muted, Align::Left);
         }
@@ -665,10 +705,27 @@ impl SettingsWindow {
     /// Changes the state for a click and returns what must happen once the borrow is dropped.
     fn handle_click(&mut self, x: i32, y: i32) -> Effects {
         let mut effects = Effects::default();
-        let Some(action) = self.action_at(x, y) else {
+        let action = self.action_at(x, y);
+        // Only ✓ saves a rename now; a click anywhere else ends it unsaved.
+        if self.editing.is_some() && !matches!(action, Some(Action::SaveName(_) | Action::CancelName | Action::EditName(_))) {
+            self.editing = None;
+            effects.layout = true;
+            self.invalidate();
+        }
+        let Some(action) = action else {
             return effects;
         };
         match action {
+            Action::EditName(index) => {
+                self.editing = Some(index);
+                self.saved_row = None;
+                effects.begins_edit = Some(index);
+            }
+            Action::SaveName(index) => effects.saves_edit = Some(index),
+            Action::CancelName => {
+                self.editing = None;
+                effects.layout = true;
+            }
             Action::Page(page) => {
                 self.page = page;
                 self.scroll = 0;
@@ -720,7 +777,7 @@ impl SettingsWindow {
                 self.settings = fresh.clone();
                 self.is_confirming_reset = false;
                 self.is_reset_done = true;
-                effects = Effects { apply: Some(fresh), sync_fields: true, layout: true, starts_done_timer: true };
+                effects = Effects { apply: Some(fresh), layout: true, starts_done_timer: true, ..Effects::default() };
             }
         }
         self.hover = None;
@@ -774,21 +831,6 @@ fn layout_fields() {
     }
 }
 
-/// Shows each device's saved rename in its box, leaving alone a box being typed in.
-fn sync_field_texts() {
-    let Some(pairs) = with_window(|state| {
-        let texts = state.devices.iter().map(|device| state.settings.renames.get(&device.id).cloned().unwrap_or_default());
-        state.fields.iter().cloned().zip(texts).collect::<Vec<_>>()
-    }) else {
-        return;
-    };
-    for (field, text) in pairs {
-        if field.currentEditor().is_none() && field.stringValue().to_string() != text {
-            field.setStringValue(&NSString::from_str(&text));
-        }
-    }
-}
-
 /// Creates one borderless rename box, styled to sit on the drawn box behind it.
 fn make_field(index: usize, text: &str, own_name: &str, font: &Font, theme: &Theme) -> Retained<NSTextField> {
     let field = NSTextField::textFieldWithString(&NSString::from_str(text), main_thread());
@@ -804,14 +846,13 @@ fn make_field(index: usize, text: &str, own_name: &str, font: &Font, theme: &The
         cell.setScrollable(true);
         cell.setWraps(false);
         cell.setUsesSingleLineMode(true);
-        cell.setSendsActionOnEndEditing(true);
+        // Leaving the field cancels; only ✓ or Return saves, so it sends nothing when an edit ends.
+        cell.setSendsActionOnEndEditing(false);
     }
     let target = delegate();
     let target: &AnyObject = target.as_ref();
-    // SAFETY: the delegate lives for the whole app and answers settingChanged: and the text delegate calls.
+    // SAFETY: the delegate lives for the whole app and answers the text delegate calls (Return, Escape).
     unsafe {
-        field.setTarget(Some(target));
-        field.setAction(Some(sel!(settingChanged:)));
         let _: () = objc2::msg_send![&*field, setDelegate: target];
     }
     field
@@ -848,7 +889,7 @@ fn rebuild_fields() {
     let fields: Vec<_> = texts.iter().zip(&names).enumerate().map(|(index, (text, name))| make_field(index, text, name, &font, &theme)).collect();
     fields.iter().for_each(|field| view.addSubview(field));
     with_window(|state| {
-        state.unsaved = vec![None; fields.len()];
+        state.editing = None;
         state.saved_row = None;
         state.fields = fields;
     });
@@ -856,11 +897,16 @@ fn rebuild_fields() {
 
 /// Runs what a click asked for, with WINDOW unborrowed.
 fn run_effects(effects: Effects) {
+    if let Some(index) = effects.begins_edit {
+        begin_edit(index);
+    }
+    if let Some(index) = effects.saves_edit {
+        if let Some(field) = with_window(|state| state.fields.get(index).cloned()).flatten() {
+            commit_edit(index, &field.stringValue().to_string());
+        }
+    }
     if let Some(settings) = effects.apply {
         apply(settings);
-    }
-    if effects.sync_fields {
-        sync_field_texts();
     }
     if effects.layout {
         layout_fields();
@@ -947,31 +993,15 @@ pub fn on_key(code: u16) {
     }
 }
 
-/// Reads a rename box into the settings and applies them.
-pub fn on_control_changed(sender: &AnyObject) {
-    // SAFETY: every control that sends settingChanged: is an NSControl.
-    let control: &NSControl = unsafe { &*(sender as *const AnyObject).cast() };
-    let Ok(index) = usize::try_from(control.tag() - FIELD_TAG_BASE) else {
-        return;
-    };
-    // Leaving the box saves what it holds, as before, now with the same "Saved" cue as Return.
-    let text = control.stringValue().to_string();
-    if let Some(settings) = with_window(|state| state.save_rename(index, &text)).flatten() {
-        apply(settings);
-        start_saved_cue();
-    }
-}
-
 impl SettingsWindow {
-    /// Saves a box's text as the device's rename (empty removes it) and returns the new settings when that
-    /// changed anything. The row then shows "Saved" if it is on screen.
+    /// Saves a field's text as the device's rename and returns the new settings when that changed anything.
+    /// Empty, or the device's own name, removes the rename, so the own name is used.
     fn save_rename(&mut self, index: usize, text: &str) -> Option<Settings> {
-        let id = self.devices.get(index)?.id.clone();
-        if let Some(unsaved) = self.unsaved.get_mut(index) {
-            *unsaved = None;
-        }
+        let device = self.devices.get(index)?;
+        let id = device.id.clone();
         self.invalidate();
         let name = text.trim();
+        let name = if name == device.name { "" } else { name };
         if self.settings.renames.get(&id).map_or("", String::as_str) == name {
             return None;
         }
@@ -980,20 +1010,59 @@ impl SettingsWindow {
         } else {
             self.settings.renames.insert(id, name.to_string());
         }
-        if self.page == DEVICES_PAGE {
-            self.saved_row = Some(index);
-        }
         Some(self.settings.clone())
     }
 
-    /// Returns a box's saved text: the rename, or empty so the device's own name shows in grey.
-    fn saved_rename(&self, index: usize) -> Option<String> {
-        let id = &self.devices.get(index)?.id;
-        Some(self.settings.renames.get(id).cloned().unwrap_or_default())
+    /// Returns the name a row's field starts with: the rename, else the device's own name.
+    fn name_in_use(&self, index: usize) -> Option<String> {
+        let device = self.devices.get(index)?;
+        Some(self.settings.renames.get(&device.id).cloned().unwrap_or_else(|| device.name.clone()))
     }
 }
 
-/// Returns which rename box a control is.
+/// Starts renaming a row: its field shows the name in use, all selected, with the keyboard. Runs with WINDOW unborrowed.
+fn begin_edit(index: usize) {
+    let Some((window, field, name)) = with_window(|state| Some((state.window.clone(), state.fields.get(index)?.clone(), state.name_in_use(index)?))).flatten() else {
+        return;
+    };
+    field.setStringValue(&NSString::from_str(&name));
+    layout_fields();
+    window.makeFirstResponder(Some(&field));
+    if let Some(editor) = field.currentEditor() {
+        // SAFETY: a nil sender is allowed.
+        unsafe { editor.selectAll(None) };
+    }
+}
+
+/// Saves a row's rename from ✓ or Return, ends the edit, and shows "Saved" on the row. Runs with WINDOW unborrowed.
+fn commit_edit(index: usize, text: &str) {
+    let settings = with_window(|state| {
+        let settings = state.save_rename(index, text);
+        state.editing = None;
+        state.saved_row = Some(index);
+        settings
+    });
+    let Some(settings) = settings else {
+        return;
+    };
+    // The field hides here, which ends its edit; it sends nothing, so nothing saves twice.
+    layout_fields();
+    if let Some(settings) = settings {
+        apply(settings);
+    }
+    start_saved_cue();
+}
+
+/// Ends a rename without saving: ✕, Escape, a click elsewhere, a page change. Runs with WINDOW unborrowed.
+fn cancel_edit() {
+    with_window(|state| {
+        state.editing = None;
+        state.invalidate();
+    });
+    layout_fields();
+}
+
+/// Returns which rename field a control is.
 fn field_index(control: &NSControl) -> Option<usize> {
     usize::try_from(control.tag() - FIELD_TAG_BASE).ok()
 }
@@ -1008,63 +1077,21 @@ fn start_saved_cue() {
     });
 }
 
-/// Marks a row unsaved while its box differs from the saved name, so its hint shows the keys.
-pub fn on_rename_typed(control: &NSControl) {
-    let Some(index) = field_index(control) else {
-        return;
-    };
-    let text = control.currentEditor().map_or_else(|| control.stringValue().to_string(), |editor| editor.string().to_string());
-    with_window(|state| {
-        let differs = state.saved_rename(index).is_some_and(|saved| saved != text.trim());
-        if let Some(unsaved) = state.unsaved.get_mut(index) {
-            *unsaved = differs.then(|| text.clone());
-        }
-        if differs && state.saved_row == Some(index) {
-            state.saved_row = None;
-        }
-        state.invalidate();
-    });
-}
-
-/// Return in a rename box: saves at once and keeps the box focused. Returns true, as the key is handled.
+/// Return in a rename field: saves, as ✓ does. Returns true, as the key is handled.
 pub fn on_rename_return(control: &NSControl, text_view: &NSTextView) -> bool {
     let Some(index) = field_index(control) else {
         return false;
     };
-    let text = text_view.string().to_string();
-    let saved = with_window(|state| {
-        let settings = state.save_rename(index, &text);
-        // Return always confirms, even when the name was already saved.
-        state.saved_row = Some(index);
-        settings
-    });
-    if let Some(Some(settings)) = &saved {
-        apply(settings.clone());
-    }
-    if saved.is_some() {
-        start_saved_cue();
-    }
+    commit_edit(index, &text_view.string().to_string());
     true
 }
 
-/// Escape in a rename box: puts the saved name back, ends the edit and saves nothing. Returns true, as the key is handled.
-pub fn on_rename_cancel(control: &NSControl, text_view: &NSTextView) -> bool {
-    let Some(index) = field_index(control) else {
+/// Escape in a rename field: cancels, as ✕ does, and saves nothing. Returns true, as the key is handled.
+pub fn on_rename_cancel(control: &NSControl, _text_view: &NSTextView) -> bool {
+    if field_index(control).is_none() {
         return false;
-    };
-    let saved = with_window(|state| {
-        if let Some(unsaved) = state.unsaved.get_mut(index) {
-            *unsaved = None;
-        }
-        state.invalidate();
-        state.saved_rename(index)
-    })
-    .flatten();
-    if let Some(saved) = saved {
-        // The box now holds the saved name, so ending the edit below finds nothing to save.
-        text_view.setString(&NSString::from_str(&saved));
-        end_editing();
     }
+    cancel_edit();
     true
 }
 
@@ -1098,7 +1125,7 @@ fn build(settings: Settings, devices: Vec<Device>) -> Retained<NSWindow> {
         is_confirming_reset: false,
         is_reset_done: false,
         done_timer: None,
-        unsaved: Vec::new(),
+        editing: None,
         saved_row: None,
         saved_timer: None,
     };
@@ -1147,7 +1174,7 @@ fn sync_dock_entry() {
     }
 }
 
-/// Forgets the window once it closes, so the next open shows fresh rows. A rename being typed is kept.
+/// Forgets the window once it closes, so the next open shows fresh rows. A rename being typed is dropped, unsaved.
 pub fn on_closed() {
     end_editing();
     let closed = WINDOW.with(|cell| cell.try_borrow_mut().ok().and_then(|mut state| state.take()));
@@ -1201,7 +1228,6 @@ pub fn on_devices_changed(settings: &Settings, devices: &[Device]) {
         layout_fields();
     }
     refresh_placeholders();
-    sync_field_texts();
 }
 
 /// Paints the settings window to a PNG without the screen. Used by capture mode and the capture example.
@@ -1253,6 +1279,9 @@ pub fn click_for_checks(name: &str) -> bool {
         "hover" => Action::SetHover(number as u8),
         "click" => Action::SetClick(number as u8),
         "show" => Action::ToggleShown(number),
+        "edit" => Action::EditName(number),
+        "save" => Action::SaveName(number),
+        "cancel_name" => Action::CancelName,
         "ask_reset" => Action::AskReset,
         "cancel_reset" => Action::CancelReset,
         "confirm_reset" => Action::ConfirmReset,
@@ -1270,16 +1299,19 @@ pub fn click_for_checks(name: &str) -> bool {
     position.is_some()
 }
 
-/// Puts the cursor in a device's rename box and types a name without finishing the edit, for checks.
+/// Opens a row's rename with its pencil and types a name without saving it, for checks.
 pub fn type_rename_for_checks(index: usize, text: &str) -> bool {
-    let Some((window, field)) = with_window(|state| state.fields.get(index).map(|field| (state.window.clone(), field.clone()))).flatten() else {
+    // Opens the row's field with its pencil first, as a user would.
+    if with_window(|state| state.editing) != Some(Some(index)) {
+        click_for_checks(&format!("edit:{index}"));
+    }
+    let Some(field) = with_window(|state| state.fields.get(index).cloned()).flatten() else {
         return false;
     };
-    window.makeFirstResponder(Some(&field));
     let Some(editor) = field.currentEditor() else {
         return false;
     };
-    // Typed through the field editor as keys would be, so the box's delegate hears each change.
+    // Typed through the field editor as keys would be, replacing the selected name.
     // SAFETY: the field editor is an NSTextView, which answers both; a nil sender is allowed.
     unsafe {
         editor.selectAll(None);
@@ -1302,9 +1334,14 @@ pub fn press_in_rename_for_checks(index: usize, is_return: bool) -> bool {
     true
 }
 
-/// Finishes a rename by moving the focus away, as a click elsewhere does, for checks.
+/// Clicks an empty spot of the page, as a user would to leave a rename, for checks.
 pub fn leave_rename_for_checks() {
-    end_editing();
+    on_click(WIDTH - 40, HEIGHT - 40);
+}
+
+/// Returns the row being renamed, for checks.
+pub fn editing_row_for_checks() -> Option<usize> {
+    with_window(|state| state.editing).flatten()
 }
 
 /// Paints the open window in both looks to `<base>_dark.png` and `<base>_light.png`, then restores its look, for checks.

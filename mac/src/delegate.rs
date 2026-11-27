@@ -42,15 +42,8 @@ define_class!(
         }
     }
 
-    // The rename boxes: typing marks a row unsaved, Return saves at once, Escape puts the saved name back.
+    // The rename field: Return saves, as ✓ does; Escape cancels, as ✕ does.
     unsafe impl NSControlTextEditingDelegate for AppDelegate {
-        #[unsafe(method(controlTextDidChange:))]
-        fn control_text_did_change(&self, notification: &NSNotification) {
-            if let Some(field) = notification.object().and_then(|object| object.downcast::<NSControl>().ok()) {
-                settings_ui::on_rename_typed(&field);
-            }
-        }
-
         #[unsafe(method(control:textView:doCommandBySelector:))]
         fn control_do_command(&self, control: &NSControl, text_view: &NSTextView, command: Sel) -> bool {
             if command == sel!(insertNewline:) {
@@ -128,11 +121,6 @@ define_class!(
         #[unsafe(method(rowClicked:))]
         fn row_clicked(&self, _sender: &NSMenuItem) {
             settings_ui::open_settings();
-        }
-
-        #[unsafe(method(settingChanged:))]
-        fn setting_changed(&self, sender: &AnyObject) {
-            settings_ui::on_control_changed(sender);
         }
 
         #[unsafe(method(captureOpenMenu:))]

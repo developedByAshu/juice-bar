@@ -240,7 +240,7 @@ pub fn capture_reset() {
     show_page_for_checks(2);
     eprintln!("capture: typed a rename: {}", type_rename_for_checks(0, "Desk keyboard"));
     eprintln!("capture: opened Advanced while typing: {}", click_for_checks("page:3"));
-    log_renames("after leaving the rename");
+    log_renames("after leaving the rename (expected unsaved)");
     eprintln!("capture: asked to reset: {}", click_for_checks("ask_reset"));
     if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_CONFIRM_PATH") {
         eprintln!("capture: confirm card saved: {}", crate::settings_ui::capture_to(&path));
@@ -253,34 +253,39 @@ pub fn capture_reset() {
     }
 }
 
-/// Walks the rename box as a user would: type, Return, type and Escape, clear and Return, type and click
-/// away. Each step is painted in both looks under JUICEBAR_CAPTURE_DIR. Used only by capture mode.
+/// Walks the rename as a user would: the idle pencil, the pencil opening the field, Return, ✕, clear and ✓,
+/// a click elsewhere, and Escape. Each step is painted in both looks under JUICEBAR_CAPTURE_DIR. Used only by capture mode.
 pub fn capture_rename() {
-    use crate::settings_ui::{capture_both_looks_for_checks, is_rename_focused_for_checks, leave_rename_for_checks, press_in_rename_for_checks, show_page_for_checks, type_rename_for_checks};
+    use crate::settings_ui::{capture_both_looks_for_checks, click_for_checks, editing_row_for_checks, leave_rename_for_checks, press_in_rename_for_checks, show_page_for_checks, type_rename_for_checks};
     let folder = std::env::var("JUICEBAR_CAPTURE_DIR").unwrap_or_default();
     let shot = |name: &str| eprintln!("capture: {name} saved: {}", capture_both_looks_for_checks(&format!("{folder}/rename_{name}")));
     show_page_for_checks(2);
-    eprintln!("capture: typed: {}", type_rename_for_checks(0, "Desk keyboard"));
-    log_renames("while typing, before Return");
-    shot("1_typing");
+    shot("1_idle");
+    eprintln!("capture: pencil opened row 0: {}", click_for_checks("edit:0"));
+    eprintln!("capture: editing row {:?}", editing_row_for_checks());
+    shot("2_editing");
+    type_rename_for_checks(0, "Desk keyboard");
     eprintln!("capture: pressed Return: {}", press_in_rename_for_checks(0, true));
     log_renames("right after Return");
-    eprintln!("capture: box still focused after Return: {}", is_rename_focused_for_checks(0));
-    shot("2_saved");
-    type_rename_for_checks(0, "Oops typo");
-    shot("3_typing_again");
-    eprintln!("capture: pressed Escape: {}", press_in_rename_for_checks(0, false));
-    log_renames("after Escape");
-    eprintln!("capture: box still focused after Escape: {}", is_rename_focused_for_checks(0));
-    shot("4_cancelled");
+    eprintln!("capture: editing row after Return {:?}", editing_row_for_checks());
+    shot("3_saved");
+    type_rename_for_checks(1, "Oops typo");
+    shot("4_typing");
+    eprintln!("capture: clicked the cross: {}", click_for_checks("cancel_name"));
+    log_renames("after the cross");
+    shot("5_cancelled");
     type_rename_for_checks(0, "");
-    press_in_rename_for_checks(0, true);
-    log_renames("after clearing and Return");
-    shot("5_cleared");
+    eprintln!("capture: clicked the tick: {}", click_for_checks("save:0"));
+    log_renames("after clearing and the tick");
+    shot("6_cleared");
     type_rename_for_checks(1, "Travel mouse");
     leave_rename_for_checks();
-    log_renames("after typing and clicking away");
-    shot("6_left");
+    log_renames("after typing and clicking elsewhere (expected unsaved)");
+    eprintln!("capture: editing row after clicking elsewhere {:?}", editing_row_for_checks());
+    type_rename_for_checks(1, "Travel mouse");
+    press_in_rename_for_checks(1, false);
+    log_renames("after typing and Escape (expected unsaved)");
+    shot("7_after_escape");
 }
 
 /// Types a rename and closes the window with Escape before it is finished. Used only by capture mode.
@@ -288,7 +293,7 @@ pub fn capture_close_while_editing() {
     crate::settings_ui::show_page_for_checks(2);
     eprintln!("capture: typed a rename: {}", crate::settings_ui::type_rename_for_checks(1, "Travel mouse"));
     crate::settings_ui::press_escape_for_checks();
-    log_renames("after closing mid edit");
+    log_renames("after closing mid edit (expected unsaved)");
 }
 
 /// Opens the menu under the item without any click. Used only by capture mode.
