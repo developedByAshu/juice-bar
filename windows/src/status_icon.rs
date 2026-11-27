@@ -7,7 +7,7 @@ use crate::messages::WM_APP_TRAY;
 use crate::theme::{current_theme, font_family, tone_color, Theme};
 use crate::util::{copy_into, to_wide};
 use juicebar_shared::tone::Tone;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use windows_sys::Win32::Foundation::{HWND, RECT};
 use windows_sys::Win32::Graphics::Gdi::{CreateBitmap, CreateDIBSection, DeleteObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS};
 use windows_sys::Win32::UI::HiDpi::{GetDpiForWindow, GetSystemMetricsForDpi};
@@ -37,6 +37,8 @@ struct TrayState {
 
 thread_local! {
     static STATE: RefCell<Option<TrayState>> = const { RefCell::new(None) };
+    // Off while the hover card is chosen: Windows then sends hover events in place of its own tooltip.
+    static SHOWS_STANDARD_TIP: Cell<bool> = const { Cell::new(true) };
 }
 
 /// Returns the juice colour: the tone, or the taskbar's own text colour when plain.
@@ -141,7 +143,8 @@ fn push(state: &mut TrayState, command: u32) {
     let pixels = icon_pixels(size, dpi, (shown.tone, shown.lowest_percent, shown.shows_percent), &current_theme());
     let icon = make_icon(size, &pixels);
     let mut data = notify_data(state.window);
-    data.uFlags = NIF_ICON | NIF_TIP | NIF_SHOWTIP | NIF_MESSAGE;
+    let tip_flag = if SHOWS_STANDARD_TIP.with(Cell::get) { NIF_SHOWTIP } else { 0 };
+    data.uFlags = NIF_ICON | NIF_TIP | tip_flag | NIF_MESSAGE;
     data.uCallbackMessage = WM_APP_TRAY;
     data.hIcon = icon;
     copy_into(&mut data.szTip, &state.tooltip);
@@ -194,6 +197,14 @@ pub fn set_tooltip(text: &str) {
             }
         }
     });
+}
+
+/// Swaps Windows' plain tooltip for hover events, so the battery card can show on hover instead.
+pub fn use_hover_card(is_on: bool) {
+    if SHOWS_STANDARD_TIP.with(|cell| cell.replace(!is_on)) == !is_on {
+        return;
+    }
+    redraw_status_icon();
 }
 
 /// Draws the icon again, for a taskbar colour or scaling change.

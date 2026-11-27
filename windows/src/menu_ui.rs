@@ -25,9 +25,9 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, TrackMouseEve
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, DestroyWindow, GetCursorPos, IsWindow, LoadCursorW,
     PostMessageW, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, TrackPopupMenu, IDC_ARROW, MF_STRING,
-    SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_CHAR, WM_CONTEXTMENU,
+    SWP_NOACTIVATE, SWP_NOZORDER, SW_SHOW, SW_SHOWNOACTIVATE, TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_ACTIVATE, WM_CHAR, WM_CONTEXTMENU,
     WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_KEYDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_PAINT, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 // The windows-sys crate does not export this message, so it is declared here.
@@ -190,6 +190,10 @@ struct Flyout {
     was_active: bool,
     /// The tooltip window that shows each row's full name.
     tooltip: HWND,
+    /// The battery card: the device rows only, without Settings and Quit.
+    is_card: bool,
+    /// Opened by hovering: it never takes focus and closes when the pointer leaves the icon.
+    is_hover: bool,
 }
 
 thread_local! {
@@ -239,6 +243,15 @@ fn unit(value: i32, dpi: u32) -> i32 {
 pub fn menu_height(device_rows: usize, points: u32) -> i32 {
     let rows = device_rows.max(1) as i32;
     let total = SUMMARY_HEIGHT + PADDING + rows * ROW_HEIGHT + DIVIDER_HEIGHT + 2 * ROW_HEIGHT + PADDING;
+    (total as f32 * menu_scale(points)).round() as i32
+}
+
+/// Returns the height at 100% scaling of the menu, or of the battery card, which has no Settings and Quit.
+fn flyout_height(device_rows: usize, points: u32, is_card: bool) -> i32 {
+    if !is_card {
+        return menu_height(device_rows, points);
+    }
+    let total = SUMMARY_HEIGHT + PADDING + device_rows.max(1) as i32 * ROW_HEIGHT + PADDING;
     (total as f32 * menu_scale(points)).round() as i32
 }
 
@@ -292,6 +305,9 @@ fn layout(flyout: &Flyout, width: i32) -> Vec<(Target, RECT)> {
         RECT { left, top, right, bottom: top + unit(ROW_HEIGHT, dpi) }
     };
     let mut targets: Vec<(Target, RECT)> = (0..count).map(|index| (Target::Device(index), rect(index))).collect();
+    if flyout.is_card {
+        return targets;
+    }
     let first_footer = count.max(1);
     targets.push((Target::Settings, rect(first_footer)));
     targets.push((Target::Quit, rect(first_footer + 1)));
@@ -408,6 +424,9 @@ fn paint(flyout: &Flyout, canvas: &mut Canvas) {
     if flyout.rows.is_empty() {
         let top = row_top(0, 0, dpi);
         canvas.text(unit(SIDE, dpi), centred(canvas, &RECT { left: 0, top, right: width, bottom: top + unit(ROW_HEIGHT, dpi) }, fonts.body), EMPTY_TEXT, fonts.body, theme.muted, Align::Left);
+    }
+    if flyout.is_card {
+        return;
     }
     let settings_top = row_top(flyout.rows.len().max(1), flyout.rows.len(), dpi);
     canvas.round_rect(divider_x, settings_top - unit(DIVIDER_HEIGHT / 2 + 1, dpi), divider_width, divider_height, 0.0, theme.border, 1.0);
@@ -704,7 +723,7 @@ pub fn place_flyout(anchor: RECT, monitor: RECT, work: RECT, width: i32, height:
 }
 
 /// Returns the flyout's position, size and scaling for its rows, next to the anchor.
-fn flyout_bounds(anchor: RECT, rows: &[DeviceRow]) -> (i32, i32, i32, i32, u32) {
+fn flyout_bounds(anchor: RECT, rows: &[DeviceRow], is_card: bool) -> (i32, i32, i32, i32, u32) {
     // SAFETY: plain lookups with out pointers that outlive the calls.
     unsafe {
         let monitor = MonitorFromRect(&anchor, MONITOR_DEFAULTTONEAREST);
@@ -715,7 +734,7 @@ fn flyout_bounds(anchor: RECT, rows: &[DeviceRow]) -> (i32, i32, i32, i32, u32) 
         GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
         let dpi = dpi_x.max(96);
         let (_, width) = column_widths(&Canvas::new(1, 1), &Fonts::new(dpi), rows, dpi);
-        let height = scale(menu_height(rows.len(), menu_points()), dpi);
+        let height = scale(flyout_height(rows.len(), menu_points(), is_card), dpi);
         let (x, y) = place_flyout(anchor, info.rcMonitor, info.rcWork, width, height, scale(SCREEN_MARGIN, dpi));
         (x, y, width, height, dpi)
     }
@@ -732,9 +751,34 @@ fn anchor_rect() -> RECT {
 
 /// Opens the flyout next to the tray icon with these devices. A second call while open closes it.
 pub fn show_menu(devices: &[Device]) {
-    if is_menu_open() {
-        close_menu();
+    open_flyout(devices, false, false);
+}
+
+/// Opens the battery card: the device rows only. A hover card never takes focus and gives way to an open menu.
+pub fn show_card(devices: &[Device], is_hover: bool) {
+    if is_hover && is_menu_open() {
         return;
+    }
+    open_flyout(devices, true, is_hover);
+}
+
+/// Closes the card that hovering opened, once the pointer leaves the icon. A clicked card stays.
+pub fn close_hover_card() {
+    if with_flyout(|flyout| flyout.is_hover) == Some(true) {
+        close_menu();
+    }
+}
+
+fn open_flyout(devices: &[Device], is_card: bool, is_hover: bool) {
+    if is_menu_open() {
+        // The same flyout asked for again closes it. A different one replaces it: a click on the icon
+        // while its hover card shows, or a right-click for the menu while the battery card is open.
+        let is_same = with_flyout(|flyout| flyout.is_card == is_card && !flyout.is_hover) == Some(true);
+        close_menu();
+        if is_same || is_hover {
+            return;
+        }
+        LAST_CLOSED.with(|cell| *cell.borrow_mut() = None);
     }
     let just_closed = LAST_CLOSED.with(|cell| cell.borrow().is_some_and(|closed| closed.elapsed() < REOPEN_GUARD));
     if just_closed {
@@ -746,11 +790,11 @@ pub fn show_menu(devices: &[Device]) {
     let anchor = anchor_rect();
     // SAFETY: Win32 window creation on the UI thread; every pointer passed outlives its call.
     unsafe {
-        let (x, y, width, height, dpi) = flyout_bounds(anchor, &rows);
+        let (x, y, width, height, dpi) = flyout_bounds(anchor, &rows, is_card);
         let class_name = to_wide(CLASS_NAME);
         let title = to_wide("Juice Bar");
         let window = CreateWindowExW(
-            WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | if is_hover { WS_EX_NOACTIVATE } else { 0 },
             class_name.as_ptr(),
             title.as_ptr(),
             WS_POPUP,
@@ -768,10 +812,14 @@ pub fn show_menu(devices: &[Device]) {
         let owner = OWNER.with(|cell| *cell.borrow());
         let tooltip = create_row_tooltips(window, &rows, dpi);
         FLYOUT.with(|cell| {
-            *cell.borrow_mut() = Some(Flyout { window, owner, rows, dpi, fonts: Fonts::new(dpi), theme, hovered: None, focused: None, is_tracking_mouse: false, was_active: false, tooltip });
+            *cell.borrow_mut() = Some(Flyout { window, owner, rows, dpi, fonts: Fonts::new(dpi), theme, hovered: None, focused: None, is_tracking_mouse: false, was_active: false, tooltip, is_card, is_hover });
         });
-        ShowWindow(window, SW_SHOW);
-        SetForegroundWindow(window);
+        if is_hover {
+            ShowWindow(window, SW_SHOWNOACTIVATE);
+        } else {
+            ShowWindow(window, SW_SHOW);
+            SetForegroundWindow(window);
+        }
     }
 }
 
@@ -781,13 +829,13 @@ pub fn refresh_menu(devices: &[Device]) {
     let open = with_flyout(|flyout| {
         flyout.hovered = None;
         flyout.focused = None;
-        (flyout.window, flyout.tooltip)
+        (flyout.window, flyout.tooltip, flyout.is_card)
     });
-    let Some((window, old_tooltip)) = open else { return };
+    let Some((window, old_tooltip, is_card)) = open else { return };
     // SAFETY: the flyout window is alive while it is stored; the old tooltip is replaced once here.
     unsafe {
         // New names or readings can change the width as well as the height.
-        let (x, y, width, height, dpi) = flyout_bounds(anchor_rect(), &rows);
+        let (x, y, width, height, dpi) = flyout_bounds(anchor_rect(), &rows, is_card);
         SetWindowPos(window, std::ptr::null_mut(), x, y, width, height, SWP_NOZORDER | SWP_NOACTIVATE);
         DestroyWindow(old_tooltip);
         let tooltip = create_row_tooltips(window, &rows, dpi);

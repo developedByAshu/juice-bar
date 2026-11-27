@@ -23,6 +23,9 @@ const WINDOW_CLASS_NAME: &str = "JuiceBarMain";
 // The tray's version 4 events: a left click or Enter on the icon.
 const NIN_SELECT: u32 = WM_USER;
 const NIN_KEYSELECT: u32 = WM_USER + 1;
+// The pointer rests on the icon or leaves it; sent only while Windows' own tooltip is off.
+const NIN_POPUPOPEN: u32 = WM_USER + 6;
+const NIN_POPUPCLOSE: u32 = WM_USER + 7;
 // Device arrival and removal, from Dbt.h.
 const DBT_DEVICEARRIVAL: u32 = 0x8000;
 const DBT_DEVICEREMOVECOMPLETE: u32 = 0x8004;
@@ -41,9 +44,14 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
     match message {
         WM_APP_TRAY => {
             let event = (lparam & 0xFFFF) as u32;
-            if matches!(event, NIN_SELECT | NIN_KEYSELECT | WM_CONTEXTMENU) {
-                with_app(|app| app.toggle_menu());
-            }
+            match event {
+                NIN_SELECT | NIN_KEYSELECT => with_app(|app| app.on_icon_click()),
+                // A right click always opens the menu, as in NetSpeedGauge.
+                WM_CONTEXTMENU => with_app(|app| app.toggle_menu()),
+                NIN_POPUPOPEN => with_app(|app| app.on_icon_hover(true)),
+                NIN_POPUPCLOSE => with_app(|app| app.on_icon_hover(false)),
+                _ => None,
+            };
             0
         }
         WM_APP_SCAN_DONE => {

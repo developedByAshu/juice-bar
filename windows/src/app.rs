@@ -5,16 +5,16 @@
 //! it runs on one long-lived read thread that owns the only HidApi and posts results back to the UI thread.
 
 use crate::bluetooth::{bluetooth_devices, remembered_names_by_kind};
-use crate::menu_ui::{close_menu, is_menu_open, refresh_menu, set_menu_text_points, show_menu, take_menu_action, MenuAction};
+use crate::menu_ui::{close_hover_card, close_menu, is_menu_open, refresh_menu, set_menu_text_points, show_card, show_menu, take_menu_action, MenuAction};
 use crate::messages::WM_APP_SCAN_DONE;
 use crate::settings_ui::{close_settings, open_settings, refresh_settings};
-use crate::status_icon::{create_status_icon, set_tooltip, update_status_icon};
+use crate::status_icon::{create_status_icon, set_tooltip, update_status_icon, use_hover_card};
 use crate::util::to_wide;
 use juicebar_shared::demo::{is_demo_mode, sample_devices};
 use juicebar_shared::device::{Device, NameSource};
 use juicebar_shared::report::{report_url, InterfaceSummary};
 use juicebar_shared::scan::{build_device, probe_usb_device, scan_dongles, ScannedDevice};
-use juicebar_shared::settings::Settings;
+use juicebar_shared::settings::{ClickAction, HoverAction, Settings};
 use juicebar_shared::tone::{icon_tone, lowest_percent};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -207,6 +207,7 @@ impl App {
         };
         create_status_icon(window);
         crate::menu_ui::set_menu_owner(window);
+        use_hover_card(app.settings.borrow().hover_action == HoverAction::Card);
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         with_app(|app| {
             app.restart_poll_timer();
@@ -310,6 +311,7 @@ impl App {
 
     /// Applies choices the settings window just changed.
     pub fn on_settings_changed(&mut self) {
+        use_hover_card(self.settings.borrow().hover_action == HoverAction::Card);
         self.restart_poll_timer();
         // Renames and confirmed names are applied by the next read; demo and real alike.
         self.refresh();
@@ -346,6 +348,35 @@ impl App {
             }
         }
         true
+    }
+
+    /// Runs the chosen On click action for a left click or Enter on the icon.
+    pub fn on_icon_click(&self) {
+        let action = self.settings.borrow().click_action;
+        match action {
+            ClickAction::Menu => self.toggle_menu(),
+            ClickAction::Card => {
+                set_menu_text_points(self.settings.borrow().menu_font_points);
+                show_card(&self.visible_devices(), false);
+            }
+            ClickAction::Settings => {
+                close_menu();
+                open_settings(self.window, self.settings.clone(), self.devices.clone());
+            }
+        }
+    }
+
+    /// Shows or hides the battery card as the pointer rests on or leaves the icon, when chosen.
+    pub fn on_icon_hover(&self, is_over: bool) {
+        if self.settings.borrow().hover_action != HoverAction::Card {
+            return;
+        }
+        if is_over {
+            set_menu_text_points(self.settings.borrow().menu_font_points);
+            show_card(&self.visible_devices(), true);
+        } else {
+            close_hover_card();
+        }
     }
 
     /// Opens or closes the flyout from the tray icon.
