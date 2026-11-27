@@ -6,12 +6,19 @@ use std::path::PathBuf;
 const FILE_NAME: &str = "settings.txt";
 const TEMP_FILE_NAME: &str = "settings.txt.tmp";
 
+/// The menu's text size in points, as NetSpeedGauge's font size: the whole menu scales from it.
+pub const MENU_FONT_POINTS_DEFAULT: u32 = 9;
+pub const MENU_FONT_POINTS_MIN: u32 = 7;
+pub const MENU_FONT_POINTS_MAX: u32 = 12;
+
 /// What the user chose.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
     pub poll_minutes: u32,
     /// Shows the lowest % next to the icon, not only its colour.
     pub shows_percent_in_icon: bool,
+    /// The menu's text size, 7 to 12 points. Its rows, icons, gaps and width scale with it.
+    pub menu_font_points: u32,
     /// Device id to the name the user typed.
     pub renames: BTreeMap<String, String>,
     /// Device ids left out of the menu.
@@ -27,6 +34,7 @@ impl Default for Settings {
         Self {
             poll_minutes: 5,
             shows_percent_in_icon: false,
+            menu_font_points: MENU_FONT_POINTS_DEFAULT,
             renames: BTreeMap::new(),
             hidden: Vec::new(),
             confirmed_bluetooth_names: BTreeMap::new(),
@@ -47,7 +55,11 @@ pub fn data_folder() -> PathBuf {
 impl Settings {
     /// Returns the settings as text, one choice per line.
     pub fn to_text(&self) -> String {
-        let mut lines = vec![format!("poll_minutes={}", self.poll_minutes), format!("shows_percent_in_icon={}", u8::from(self.shows_percent_in_icon))];
+        let mut lines = vec![
+            format!("poll_minutes={}", self.poll_minutes),
+            format!("shows_percent_in_icon={}", u8::from(self.shows_percent_in_icon)),
+            format!("menu_font_points={}", self.menu_font_points),
+        ];
         lines.extend(self.renames.iter().map(|(id, name)| format!("rename.{id}={name}")));
         lines.extend(self.hidden.iter().map(|id| format!("hidden.{id}=1")));
         lines.extend(self.confirmed_bluetooth_names.iter().map(|(id, name)| format!("bluetooth_name.{id}={name}")));
@@ -62,6 +74,9 @@ impl Settings {
             match key {
                 "poll_minutes" => settings.poll_minutes = value.parse().unwrap_or(5).clamp(1, 60),
                 "shows_percent_in_icon" => settings.shows_percent_in_icon = value == "1",
+                "menu_font_points" => {
+                    settings.menu_font_points = value.parse().unwrap_or(MENU_FONT_POINTS_DEFAULT).clamp(MENU_FONT_POINTS_MIN, MENU_FONT_POINTS_MAX);
+                }
                 _ => {
                     if let Some(id) = key.strip_prefix("rename.") {
                         settings.renames.insert(id.to_string(), value.to_string());

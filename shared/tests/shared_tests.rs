@@ -3,7 +3,7 @@ use juicebar_shared::names::{resolve_name, NameCandidates};
 use juicebar_shared::protocols::bytech::{build_request, parse_power_answer, Bytech};
 use juicebar_shared::protocols::{BatteryProtocol, Reading};
 use juicebar_shared::report::report_url;
-use juicebar_shared::settings::Settings;
+use juicebar_shared::settings::{Settings, MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
 use juicebar_shared::tone::{icon_tone, tone_for_percent, Tone};
 use juicebar_shared::transport::ReplayTransport;
 
@@ -87,6 +87,18 @@ fn settings_survive_a_round_trip_and_skip_broken_lines() {
     assert_eq!(loaded.hidden, settings.hidden);
     assert_eq!(loaded.poll_minutes, 60);
     assert!(loaded.shows_percent_in_icon);
+}
+
+#[test]
+fn menu_font_points_parse_clamp_and_round_trip() {
+    assert_eq!(Settings::default().menu_font_points, MENU_FONT_POINTS_DEFAULT);
+    assert_eq!(Settings::from_text("menu_font_points=11\n").menu_font_points, 11);
+    assert_eq!(Settings::from_text("menu_font_points=3\n").menu_font_points, MENU_FONT_POINTS_MIN);
+    assert_eq!(Settings::from_text("menu_font_points=40\n").menu_font_points, MENU_FONT_POINTS_MAX);
+    assert_eq!(Settings::from_text("menu_font_points=big\n").menu_font_points, MENU_FONT_POINTS_DEFAULT);
+    assert_eq!(Settings::from_text("poll_minutes=5\n").menu_font_points, MENU_FONT_POINTS_DEFAULT);
+    let settings = Settings { menu_font_points: 7, ..Settings::default() };
+    assert_eq!(Settings::from_text(&settings.to_text()).menu_font_points, 7);
 }
 
 #[test]
