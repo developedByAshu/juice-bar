@@ -81,6 +81,9 @@ const RESET_LABEL: &str = "Reset all";
 // The green "Done" line under Reset stays this long after a reset, as on the Mac.
 const RESET_DONE_MS: u32 = 4_000;
 const RESET_DONE_TIMER: usize = 1;
+// The green "Saved" line under a device's name after a rename, as on the Mac.
+const RENAME_SAVED_TIMER: usize = 2;
+const RENAME_SAVED_MS: u32 = 2_000;
 const RESET_DONE_TEXT: &str = "Done. Every setting is back to its default.";
 const ICON_DONE: &str = "\u{EC61}";
 // The done line's green, the same as NetSpeedGauge's and the Mac app's.
@@ -215,6 +218,8 @@ struct Window {
     edit_brush: HBRUSH,
     /// The green "Done" line shows under Reset for a few seconds after a reset.
     shows_reset_done: bool,
+    /// The device whose rename was just saved; its row shows a green "Saved" line for a moment.
+    saved_id: Option<String>,
 }
 
 thread_local! {
@@ -647,6 +652,11 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                             draw_button(canvas, state, &rect, label, control, is_accent);
                         }
                     }
+                } else if state.saved_id.as_deref() == Some(device.id.as_str()) {
+                    let good = if theme.is_dark { GOOD_DARK } else { GOOD_LIGHT };
+                    row_label(canvas, state, name_x, top, &device.name, " ", first_control - scale(12, dpi) - name_x);
+                    canvas.text(name_x, top + scale(29, dpi), ICON_DONE, fonts.small_icon, good, Align::Left);
+                    canvas.text(name_x + scale(14, dpi), top + scale(27, dpi), "Saved", fonts.small, good, Align::Left);
                 } else {
                     row_label(canvas, state, name_x, top, &device.name, &hint, first_control - scale(12, dpi) - name_x);
                 }
@@ -977,6 +987,9 @@ fn close_rename(keep: bool) {
             }
             // Devices keep their own names; the rename shows wherever a name is drawn, at once.
             save_and_announce(state);
+            state.saved_id = Some(id.clone());
+            // SAFETY: a one-shot timer on our own window, stopped when it fires.
+            unsafe { SetTimer(state.window, RENAME_SAVED_TIMER, RENAME_SAVED_MS, None) };
         });
     }
     invalidate();
@@ -1175,6 +1188,12 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
             DestroyWindow(window);
             0
         }
+        WM_TIMER if wparam == RENAME_SAVED_TIMER => {
+            KillTimer(window, RENAME_SAVED_TIMER);
+            with_window(|state| state.saved_id = None);
+            invalidate();
+            0
+        }
         WM_TIMER if wparam == RESET_DONE_TIMER => {
             KillTimer(window, RESET_DONE_TIMER);
             with_window(|state| state.shows_reset_done = false);
@@ -1300,6 +1319,7 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
                 edit: None,
                 edit_brush: CreateSolidBrush(swap_rgb(rename_fill(&theme))),
                 shows_reset_done: false,
+                saved_id: None,
             });
         });
         ShowWindow(window, SW_SHOW);
