@@ -121,7 +121,7 @@ fn build_content(settings: &Settings, devices: &[Device]) -> (Retained<NSStackVi
     let reset_note = label("", false);
     reset_note.setTextColor(Some(&objc2_app_kit::NSColor::systemGreenColor()));
     stack.addArrangedSubview(&row(&[&reset, &reset_note]));
-    stack.addArrangedSubview(&label(&format!("Juice Bar {} · github.com/developedByAshu/juice-bar", juicebar_shared::APP_VERSION), false));
+    stack.addArrangedSubview(&label(&format!("Juice Bar {} · Made in India with ♥", juicebar_shared::APP_VERSION), false));
     (stack, reset_note)
 }
 
@@ -207,16 +207,26 @@ pub fn on_reset_clicked() {
     show_confirm(&window, "Reset all settings?", "Names, hidden devices, the check interval and the % next to the icon go back to their defaults.", "Reset", || {
         let fresh = Settings::default();
         crate::app::apply_settings(fresh.clone());
+        let Some((window, devices)) = WINDOW.with(|cell| cell.borrow().as_ref().map(|open| (open.window.clone(), open.devices.clone()))) else {
+            return;
+        };
+        let (content, note) = build_content(&fresh, &devices);
+        swap_content(&window, &content);
+        note.setStringValue(&NSString::from_str("✓ All settings are back to their defaults"));
         WINDOW.with(|cell| {
             if let Some(open) = cell.borrow_mut().as_mut() {
-                let (content, note) = build_content(&fresh, &open.devices);
-                open.window.setContentView(Some(&content));
-                note.setStringValue(&NSString::from_str("✓ All settings are back to their defaults"));
                 open.reset_note = note;
             }
         });
         start_timer(RESET_NOTE_SECONDS, sel!(hideResetNote:), false);
     });
+}
+
+/// Replaces the window content. A rename box being edited ends its edit first and sends its action,
+/// so this must run with WINDOW unborrowed, or that action borrows it again and the app aborts.
+fn swap_content(window: &NSWindow, content: &NSView) {
+    window.makeFirstResponder(None);
+    window.setContentView(Some(content));
 }
 
 /// Clears the reset note after a few seconds.
@@ -257,21 +267,24 @@ pub fn capture_to(path: &str) -> bool {
 
 /// Rebuilds an open window when the set of devices changed, so new devices appear without reopening.
 pub fn on_devices_changed(settings: &Settings, devices: &[Device]) {
-    WINDOW.with(|cell| {
-        let mut state = cell.borrow_mut();
-        let Some(open) = state.as_mut() else {
-            return;
-        };
+    let window = WINDOW.with(|cell| {
+        let state = cell.borrow();
+        let open = state.as_ref()?;
         let same = open.devices.len() == devices.len() && open.devices.iter().zip(devices).all(|(old, new)| old.id == new.id);
-        if same {
-            return;
+        (!same).then(|| open.window.clone())
+    });
+    let Some(window) = window else {
+        return;
+    };
+    let (content, note) = build_content(settings, devices);
+    swap_content(&window, &content);
+    content.layoutSubtreeIfNeeded();
+    let fitting = content.fittingSize();
+    window.setContentSize(NSSize::new(WINDOW_WIDTH.max(fitting.width), fitting.height));
+    WINDOW.with(|cell| {
+        if let Some(open) = cell.borrow_mut().as_mut() {
+            open.devices = devices.to_vec();
+            open.reset_note = note;
         }
-        let (content, note) = build_content(settings, devices);
-        open.window.setContentView(Some(&content));
-        content.layoutSubtreeIfNeeded();
-        let fitting = content.fittingSize();
-        open.window.setContentSize(NSSize::new(WINDOW_WIDTH.max(fitting.width), fitting.height));
-        open.devices = devices.to_vec();
-        open.reset_note = note;
     });
 }
