@@ -16,7 +16,7 @@ pub fn startup_command(program_path: &str) -> String {
 }
 
 /// Returns the full path of the running program.
-fn program_path() -> Option<String> {
+pub fn program_path() -> Option<String> {
     let mut buffer = vec![0u16; MAX_PATH_UNITS];
     // SAFETY: the buffer length passed matches the buffer.
     let length = unsafe { GetModuleFileNameW(std::ptr::null_mut(), buffer.as_mut_ptr(), buffer.len() as u32) };

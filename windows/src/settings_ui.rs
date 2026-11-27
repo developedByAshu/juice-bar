@@ -7,6 +7,7 @@ use crate::glyph::glass_image;
 use crate::menu_ui::{connection_label, fit_text};
 use crate::messages::WM_APP_SETTINGS_CHANGED;
 use crate::startup;
+use crate::tray_pin;
 use crate::theme::{apply_window_look, current_theme, draw_made_with_love, on_theme_change, tone_color, Backdrop, Theme, GREEN, ICON_FONT, UI_FONT, UI_FONT_STRONG};
 use crate::util::{scale, to_wide};
 use juicebar_shared::device::{Device, NameSource};
@@ -102,6 +103,7 @@ enum Control {
     MenuTextLess,
     MenuTextMore,
     PercentToggle,
+    PinToggle,
     StartupToggle,
     Reset,
     Rename(usize),
@@ -115,6 +117,7 @@ enum Setting {
     Poll,
     MenuText,
     Percent,
+    TaskbarPin,
     Startup,
     Reset,
 }
@@ -218,6 +221,7 @@ fn page_blocks(state: &Window) -> Vec<Block> {
             Block::Setting(Setting::Poll),
             Block::Section("Tray icon"),
             Block::Setting(Setting::Percent),
+            Block::Setting(Setting::TaskbarPin),
             Block::Setting(Setting::MenuText),
             Block::Section("Startup"),
             Block::Setting(Setting::Startup),
@@ -319,6 +323,7 @@ fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
             // As in NetSpeedGauge, a switch row reacts anywhere on the row.
             Block::Setting(Setting::Percent) => controls.push((Control::PercentToggle, row(top))),
             Block::Setting(Setting::Startup) => controls.push((Control::StartupToggle, row(top))),
+            Block::Setting(Setting::TaskbarPin) => controls.push((Control::PinToggle, row(top))),
             Block::Setting(Setting::Reset) => {
                 let label = if state.is_confirming_reset { RESET_CONFIRM_LABEL } else { RESET_LABEL };
                 controls.push((Control::Reset, button_rect(canvas, state.fonts.body, label, right, top, dpi)));
@@ -504,7 +509,7 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                     Setting::Poll => rect_of(Control::PollLess).map_or(right, |rect| rect.left),
                     Setting::MenuText => rect_of(Control::MenuTextLess).map_or(right, |rect| rect.left),
                     Setting::Reset => rect_of(Control::Reset).map_or(right, |rect| rect.left),
-                    Setting::Percent | Setting::Startup => toggle_rect(right, top, dpi).left,
+                    Setting::Percent | Setting::Startup | Setting::TaskbarPin => toggle_rect(right, top, dpi).left,
                 };
                 let label_room = control_left - scale(14, dpi) - text_x;
                 match setting {
@@ -522,9 +527,11 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                             draw_stepper(canvas, state, (Control::MenuTextLess, Control::MenuTextMore), &less, &more, &format!("{points} pt"), points > MENU_FONT_POINTS_MIN, points < MENU_FONT_POINTS_MAX);
                         }
                     }
-                    Setting::Percent | Setting::Startup => {
+                    Setting::Percent | Setting::Startup | Setting::TaskbarPin => {
                         let (label, hint, is_on, control) = if setting == Setting::Percent {
                             ("Show the lowest % in the icon", "Shows the number instead of the juice glass", settings.shows_percent_in_icon, Control::PercentToggle)
+                        } else if setting == Setting::TaskbarPin {
+                            ("Show on the taskbar", "Keeps the icon next to the clock, not under the ^ arrow", tray_pin::is_pinned(), Control::PinToggle)
                         } else {
                             ("Start with Windows", "Opens Juice Bar when you sign in", startup::is_enabled(), Control::StartupToggle)
                         };
@@ -678,6 +685,9 @@ fn activate(control: Control) {
         }
         Control::StartupToggle => {
             startup::set_enabled(!startup::is_enabled());
+        }
+        Control::PinToggle => {
+            tray_pin::set_pinned(!tray_pin::is_pinned());
         }
         Control::Reset => {
             with_window(|state| {

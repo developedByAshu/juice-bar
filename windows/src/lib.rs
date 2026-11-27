@@ -20,4 +20,5 @@ pub mod settings_ui;
 pub mod startup;
 pub mod status_icon;
 pub mod theme;
+pub mod tray_pin;
 pub mod util;
