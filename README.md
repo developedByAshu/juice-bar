@@ -7,8 +7,8 @@ Battery % of your wireless mouse and keyboard, in the Mac menu bar and the Windo
 
 - **One glance:** a juice glass in the menu bar fills to your lowest device. Green when everything
   is above 85%, plain from 30 to 85%, amber from 20 to 30%, red below 20%.
-- **One click:** every device with its real name, connection (2.4 GHz, Bluetooth, USB) and %.
-  A bolt when charging.
+- **One click:** every device with its real name and %, a bolt when charging; hover a row for its
+  connection (2.4 GHz, Bluetooth, USB). Right click for Settings and Quit.
 - **Native and light:** AppKit on Mac, Fluent on Windows; follows light/dark, accent and contrast.
   0.0% CPU at idle, about 14 MB of memory on the Mac.
 
@@ -17,10 +17,10 @@ Battery % of your wireless mouse and keyboard, in the Mac menu bar and the Windo
 | # | Device | Connection | Status |
 |---|---|---|---|
 | 1 | Kreo Swarm 75 (dongle 3554:fa09) | 2.4 GHz | Reads %, verified |
-| 2 | Kreo Hawk Pro family, incl. Amkette XS Flow Pro Plus (dongle 04f3:026f) | 2.4 GHz | Name shown; % in progress |
+| 2 | Kreo Hawk Pro family, incl. Amkette XS Flow Pro Plus (dongle 04f3:026f) | 2.4 GHz | Reads %, verified |
 | 3 | Any mouse or keyboard macOS / Windows reports over Bluetooth | Bluetooth | Reads % from the OS |
 
-Not listed? Click the device in the menu, then **Report device**. It opens a prefilled GitHub issue
+Not listed? Right click (or ⌥-click) the device in the menu, then **Report**. It opens a prefilled GitHub issue
 with only the device's ids, so support can be added. **Try to detect** asks the device in every
 known protocol, only when you click it.
 
