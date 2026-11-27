@@ -98,7 +98,21 @@ fn flyout_sits_beside_a_left_taskbar() {
 #[test]
 fn flyout_height_grows_with_rows_and_keeps_room_for_the_empty_line() {
     assert_eq!(menu_height(0), menu_height(1));
-    assert_eq!(menu_height(3) - menu_height(2), 40);
+    assert_eq!(menu_height(3) - menu_height(2), 32, "NetSpeedGauge's 32 px menu rows");
+}
+
+#[test]
+fn long_name_is_cut_and_the_full_name_goes_in_the_tooltip() {
+    let row = build_device_row(&device("Amkette XS Flow Pro Plus", Some((62, false)), Some("yuandaxin")));
+    assert_eq!(row.name, "Amkette XS Fl\u{2026}");
+    assert_eq!(row.tooltip, "Amkette XS Flow Pro Plus \u{00B7} 2.4 GHz");
+}
+
+#[test]
+fn not_connected_moves_from_the_row_into_the_tooltip() {
+    let row = build_device_row(&device("Kreo Swarm 75", None, Some("bytech")));
+    assert_eq!(row.end, RowEnd::NotConnected);
+    assert_eq!(row.tooltip, "Kreo Swarm 75 \u{00B7} 2.4 GHz \u{00B7} Not connected");
 }
 
 #[test]
