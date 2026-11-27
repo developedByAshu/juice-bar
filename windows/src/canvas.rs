@@ -1,14 +1,13 @@
-//! A drawing surface with see-through pixels, smooth rounded shapes and smooth text, using only
-//! built-in Windows drawing. See-through pixels let the Mica or Acrylic backdrop show behind the
-//! flyout and the settings window; plain Windows text drawing would punch holes in them, so text
-//! is drawn as a mask first and then blended in its colour.
+//! A drawing surface with smooth rounded shapes and ClearType text, using only built-in Windows
+//! drawing. The flyout and the settings window are solid, as NetSpeedGauge's are, so text is drawn
+//! straight onto the painted background exactly the way NetSpeedGauge draws it.
 
 use crate::glyph::round_rect_coverage;
 use crate::util::to_wide;
 use windows_sys::Win32::Foundation::SIZE;
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, GdiFlush, GetTextExtentPoint32W,
-    SelectObject, SetBkMode, SetTextColor, TextOutW, ANTIALIASED_QUALITY, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    SelectObject, SetBkMode, SetTextColor, TextOutW, ANTIALIASED_QUALITY, BITMAPINFO, CLEARTYPE_QUALITY, FONT_QUALITY, BITMAPINFOHEADER, BI_RGB,
     CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_PITCH, DIB_RGB_COLORS, FF_DONTCARE, HBITMAP, HDC, HFONT,
     OUT_DEFAULT_PRECIS, SRCCOPY, TRANSPARENT,
 };
@@ -23,8 +22,17 @@ pub enum Align {
     Right,
 }
 
-/// Creates a font at a size in points for the given screen scaling.
+/// Creates a ClearType font at a size in points for the given screen scaling, as NetSpeedGauge does.
 pub fn create_font(family: &str, points: f32, weight: i32, dpi: u32) -> HFONT {
+    font_with_quality(family, points, weight, dpi, CLEARTYPE_QUALITY)
+}
+
+/// Creates a grey-smoothed font for text on see-through pixels, such as the tray icon's number.
+pub fn create_see_through_font(family: &str, points: f32, weight: i32, dpi: u32) -> HFONT {
+    font_with_quality(family, points, weight, dpi, ANTIALIASED_QUALITY)
+}
+
+fn font_with_quality(family: &str, points: f32, weight: i32, dpi: u32, quality: FONT_QUALITY) -> HFONT {
     let family = to_wide(family);
     // SAFETY: `family` is null-terminated and outlives the call. The caller owns the returned font.
     unsafe {
@@ -40,8 +48,7 @@ pub fn create_font(family: &str, points: f32, weight: i32, dpi: u32) -> HFONT {
             u32::from(DEFAULT_CHARSET),
             u32::from(OUT_DEFAULT_PRECIS),
             u32::from(CLIP_DEFAULT_PRECIS),
-            // Grey smoothing, not ClearType: its coloured edges look wrong on a see-through backdrop.
-            u32::from(ANTIALIASED_QUALITY),
+            u32::from(quality),
             u32::from(DEFAULT_PITCH) | u32::from(FF_DONTCARE),
             family.as_ptr(),
         )
@@ -209,8 +216,32 @@ impl Canvas {
         }
     }
 
-    /// Draws text in a 0xRRGGBB colour, smoothed, keeping the backdrop showing around each letter.
+    /// Draws text in a 0xRRGGBB colour straight onto the solid canvas with ClearType, as NetSpeedGauge does.
     pub fn text(&mut self, x: i32, y: i32, text: &str, font: HFONT, color: u32, align: Align) {
+        if text.is_empty() {
+            return;
+        }
+        let width = self.text_width(text, font);
+        let left = match align {
+            Align::Left => x,
+            Align::Center => x - width / 2,
+            Align::Right => x - width,
+        };
+        let wide: Vec<u16> = text.encode_utf16().collect();
+        let windows_color = ((color & 0xFF) << 16) | (color & 0xFF00) | ((color >> 16) & 0xFF);
+        // SAFETY: the surface and font are valid, and `wide` outlives the call.
+        unsafe {
+            GdiFlush();
+            SelectObject(self.target.surface, font);
+            SetTextColor(self.target.surface, windows_color);
+            TextOutW(self.target.surface, left, y, wide.as_ptr(), wide.len() as i32);
+            GdiFlush();
+        }
+    }
+
+    /// Draws text on see-through pixels, as the tray icon needs: drawn as a mask first, then blended in
+    /// its colour, so the taskbar shows around each letter. Use a font from `create_see_through_font`.
+    pub fn see_through_text(&mut self, x: i32, y: i32, text: &str, font: HFONT, color: u32, align: Align) {
         if text.is_empty() {
             return;
         }

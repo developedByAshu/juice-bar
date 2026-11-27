@@ -1,7 +1,7 @@
 //! The tray icon: the battery glyph in the tone of the lowest device, or that device's % in the
 //! same tone when the user asks for the number.
 
-use crate::canvas::{create_font, Align, Canvas};
+use crate::canvas::{create_see_through_font, Align, Canvas};
 use crate::glyph::glass_image;
 use crate::messages::WM_APP_TRAY;
 use crate::theme::{current_theme, font_family, tone_color, Theme};
@@ -74,10 +74,10 @@ fn percent_pixels(size: u32, dpi: u32, percent: u8, color: u32) -> Vec<u32> {
     let text = percent.to_string();
     let mut points = size as f32 * 0.78 * 72.0 / dpi as f32;
     loop {
-        let font = create_font(font_family(), points, BOLD, dpi);
+        let font = create_see_through_font(font_family(), points, BOLD, dpi);
         let (width, height) = canvas.text_size(&text, font);
         if width <= size as i32 || points < 5.0 {
-            canvas.text(size as i32 / 2, (size as i32 - height) / 2, &text, font, color, Align::Center);
+            canvas.see_through_text(size as i32 / 2, (size as i32 - height) / 2, &text, font, color, Align::Center);
             // SAFETY: the font was created above and is not used again.
             unsafe { DeleteObject(font) };
             break;

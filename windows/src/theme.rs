@@ -1,23 +1,34 @@
 //! Light or dark, the accent colour, transparency effects and high contrast, read from Windows
 //! and followed live: every window redraws the moment one of them changes, no restart.
 
+use crate::canvas::{mix, Align, Canvas};
 use crate::util::to_wide;
 use juicebar_shared::tone::Tone;
+use windows_sys::Win32::Graphics::Gdi::HFONT;
 use std::cell::RefCell;
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Dwm::{
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
-    DWMWA_BORDER_COLOR, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_SYSTEMBACKDROP_TYPE, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE,
     DWMWCP_ROUND,
 };
 use windows_sys::Win32::Graphics::Gdi::{GetSysColor, COLOR_BTNFACE, COLOR_GRAYTEXT, COLOR_HIGHLIGHT, COLOR_HIGHLIGHTTEXT, COLOR_WINDOW, COLOR_WINDOWTEXT};
-use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_BINARY, RRF_RT_REG_DWORD, RRF_RT_REG_SZ};
+use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD, RRF_RT_REG_SZ};
 use windows_sys::Win32::UI::Accessibility::{HCF_HIGHCONTRASTON, HIGHCONTRASTW};
 use windows_sys::Win32::UI::Controls::MARGINS;
 use windows_sys::Win32::UI::WindowsAndMessaging::{SystemParametersInfoW, SPI_GETHIGHCONTRAST};
 
 const PERSONALIZE: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize";
-const FALLBACK_ACCENT: u32 = 0x0067C0;
+const FALLBACK_ACCENT: u32 = 0x4C9AFF;
+const MADE_WITH_LOVE: &str = "Made in India with ";
+const ICON_HEART: &str = "\u{EB52}";
+const HEART_COLOR: u32 = 0xE5484D;
+const HEART_DROP: i32 = 3;
+
+/// The fonts NetSpeedGauge draws with, so both apps read the same.
+pub const UI_FONT: &str = "Segoe UI";
+pub const UI_FONT_STRONG: &str = "Segoe UI Semibold";
+pub const ICON_FONT: &str = "Segoe MDL2 Assets";
 // Windows 11 build 22621 (22H2) is the first that draws Mica and Acrylic behind any window.
 const FIRST_BACKDROP_BUILD: u32 = 22621;
 
@@ -50,6 +61,15 @@ pub struct Theme {
     pub on_accent: u32,
     /// The text colour of the taskbar, for the plain glyph.
     pub taskbar_text: u32,
+    /// The chosen page in the sidebar, as NetSpeedGauge draws it.
+    pub selected: u32,
+    /// Plain buttons, such as Reset and the step buttons.
+    pub button: u32,
+    pub button_hover: u32,
+    /// The flyout's own colour, a step above the window.
+    pub surface: u32,
+    /// The accent as NetSpeedGauge shows it: switches that are on and the sidebar marker.
+    pub highlight: u32,
 }
 
 thread_local! {
@@ -81,32 +101,18 @@ pub fn windows_build() -> u32 {
     read_text(HKEY_LOCAL_MACHINE, "SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", "CurrentBuildNumber").and_then(|text| text.parse().ok()).unwrap_or(0)
 }
 
-/// Reads Windows' accent shades (light 3 to dark 3), each as 0xRRGGBB.
-fn accent_palette() -> Option<[u32; 7]> {
-    let (path, name) = (to_wide("Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\Accent"), to_wide("AccentPalette"));
-    let mut bytes = [0u8; 32];
-    let mut size = bytes.len() as u32;
-    // SAFETY: the strings are null-terminated, and the buffer size passed matches the buffer.
-    let status = unsafe { RegGetValueW(HKEY_CURRENT_USER, path.as_ptr(), name.as_ptr(), RRF_RT_REG_BINARY, std::ptr::null_mut(), bytes.as_mut_ptr().cast(), &mut size) };
-    if status != 0 || size < 28 {
-        return None;
+/// Returns the user's accent read the way NetSpeedGauge reads it, or a calm blue if it would be hard to see.
+fn accent_color() -> u32 {
+    let Some(stored) = read_dword(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\DWM", "AccentColor") else {
+        return FALLBACK_ACCENT;
+    };
+    let (red, green, blue) = (stored & 0xFF, (stored >> 8) & 0xFF, (stored >> 16) & 0xFF);
+    let brightest = red.max(green).max(blue);
+    let dullest = red.min(green).min(blue);
+    if brightest < 90 || brightest - dullest < 40 {
+        return FALLBACK_ACCENT;
     }
-    let mut shades = [0u32; 7];
-    for (index, shade) in shades.iter_mut().enumerate() {
-        let at = index * 4;
-        *shade = (u32::from(bytes[at]) << 16) | (u32::from(bytes[at + 1]) << 8) | u32::from(bytes[at + 2]);
-    }
-    Some(shades)
-}
-
-/// Returns the accent as Windows itself uses it on controls: a light shade in dark mode, a dark one in light mode.
-fn accent_color(is_dark: bool) -> u32 {
-    if let Some(shades) = accent_palette() {
-        return if is_dark { shades[1] } else { shades[4] };
-    }
-    read_dword(HKEY_CURRENT_USER, "Software\\Microsoft\\Windows\\DWM", "AccentColor").map_or(FALLBACK_ACCENT, |stored| {
-        ((stored & 0xFF) << 16) | (stored & 0xFF00) | ((stored >> 16) & 0xFF)
-    })
+    (red << 16) | (green << 8) | blue
 }
 
 fn is_high_contrast() -> bool {
@@ -147,6 +153,7 @@ pub fn icon_font_family() -> &'static str {
 pub fn build_theme(is_dark: bool, is_taskbar_dark: bool, is_high_contrast: bool, transparency_on: bool, build: u32, accent: u32) -> Theme {
     let has_backdrop = transparency_on && !is_high_contrast && build >= FIRST_BACKDROP_BUILD;
     let taskbar_text = if is_taskbar_dark { 0xFFFFFF } else { 0x000000 };
+    // The same colours as NetSpeedGauge's palette (NetSpeedGauge shared/src/palette.rs), so the apps match.
     if is_dark {
         Theme {
             is_dark,
@@ -155,13 +162,18 @@ pub fn build_theme(is_dark: bool, is_taskbar_dark: bool, is_high_contrast: bool,
             has_backdrop,
             accent,
             background: 0x202020,
-            card: 0x2D2D2D,
+            card: 0x2B2B2B,
             hover: 0xFFFFFF,
-            border: 0x3D3D3D,
-            text: 0xFFFFFF,
-            muted: 0xA0A0A0,
-            on_accent: 0x000000,
+            border: 0x3A3A3A,
+            text: 0xF5F5F5,
+            muted: 0xA6A6A6,
+            on_accent: 0x1B1B1B,
             taskbar_text,
+            selected: 0x454545,
+            button: 0x3A3A3A,
+            button_hover: 0x454545,
+            surface: 0x323232,
+            highlight: mix(accent, 0xFFFFFF, 0.15),
         }
     } else {
         Theme {
@@ -170,14 +182,19 @@ pub fn build_theme(is_dark: bool, is_taskbar_dark: bool, is_high_contrast: bool,
             is_high_contrast,
             has_backdrop,
             accent,
-            background: 0xF3F3F3,
+            background: 0xE8E8E8,
             card: 0xFFFFFF,
             hover: 0x000000,
-            border: 0xE0E0E0,
-            text: 0x1A1A1A,
-            muted: 0x5D5D5D,
+            border: 0xD4D4D4,
+            text: 0x1B1B1B,
+            muted: 0x5F5F5F,
             on_accent: 0xFFFFFF,
             taskbar_text,
+            selected: 0xFFFFFF,
+            button: 0xE2E2E2,
+            button_hover: 0xD6D6D6,
+            surface: 0xFFFFFF,
+            highlight: accent,
         }
     }
 }
@@ -188,7 +205,9 @@ pub fn current_theme() -> Theme {
     let is_taskbar_dark = read_dword(HKEY_CURRENT_USER, PERSONALIZE, "SystemUsesLightTheme") != Some(1);
     let transparency_on = read_dword(HKEY_CURRENT_USER, PERSONALIZE, "EnableTransparency") != Some(0);
     let contrast = is_high_contrast();
-    let mut theme = build_theme(is_dark, is_taskbar_dark, contrast, transparency_on, windows_build(), accent_color(is_dark));
+    let mut theme = build_theme(is_dark, is_taskbar_dark, contrast, transparency_on, windows_build(), accent_color());
+    // Solid colours, as NetSpeedGauge paints its windows, so the two apps look the same.
+    theme.has_backdrop = false;
     if contrast {
         // High contrast: Windows' own colours only, so the user's chosen scheme is honoured exactly.
         theme.background = system_color(COLOR_WINDOW);
@@ -200,6 +219,11 @@ pub fn current_theme() -> Theme {
         theme.accent = system_color(COLOR_HIGHLIGHT);
         theme.on_accent = system_color(COLOR_HIGHLIGHTTEXT);
         theme.taskbar_text = system_color(COLOR_WINDOWTEXT);
+        theme.selected = system_color(COLOR_HIGHLIGHT);
+        theme.button = system_color(COLOR_BTNFACE);
+        theme.button_hover = system_color(COLOR_HIGHLIGHT);
+        theme.surface = system_color(COLOR_WINDOW);
+        theme.highlight = system_color(COLOR_HIGHLIGHT);
         theme.is_dark = (theme.background & 0xFF) < 0x80;
     }
     theme
@@ -256,9 +280,13 @@ pub enum Backdrop {
 pub fn apply_window_look(window: HWND, theme: &Theme, backdrop: Backdrop) {
     set_attribute(window, DWMWA_USE_IMMERSIVE_DARK_MODE, u32::from(theme.is_dark));
     set_attribute(window, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND as u32);
+    let windows_color = |color: u32| ((color & 0xFF) << 16) | (color & 0xFF00) | ((color >> 16) & 0xFF);
     if backdrop == Backdrop::Flyout {
-        let border = ((theme.border & 0xFF) << 16) | (theme.border & 0xFF00) | ((theme.border >> 16) & 0xFF);
-        set_attribute(window, DWMWA_BORDER_COLOR, border);
+        set_attribute(window, DWMWA_BORDER_COLOR, windows_color(theme.border));
+    } else {
+        // The title bar takes the window's colour, as NetSpeedGauge's does, so the two read as one surface.
+        set_attribute(window, DWMWA_CAPTION_COLOR, windows_color(theme.background));
+        set_attribute(window, DWMWA_TEXT_COLOR, windows_color(theme.text));
     }
     let kind = match (theme.has_backdrop, backdrop) {
         (false, _) => DWMSBT_NONE,
@@ -270,6 +298,15 @@ pub fn apply_window_look(window: HWND, theme: &Theme, backdrop: Backdrop) {
     let margins = MARGINS { cxLeftWidth: extend, cxRightWidth: extend, cyTopHeight: extend, cyBottomHeight: extend };
     // SAFETY: `margins` outlives the call.
     unsafe { DwmExtendFrameIntoClientArea(window, &margins) };
+}
+
+/// Draws the "Made in India with love" line, centred, with a real heart icon. Copied from NetSpeedGauge.
+pub fn draw_made_with_love(canvas: &mut Canvas, center_x: i32, y: i32, font: HFONT, icon_font: HFONT, color: u32) {
+    let text_width = canvas.text_width(MADE_WITH_LOVE, font);
+    let heart_width = canvas.text_width(ICON_HEART, icon_font);
+    let left = center_x - (text_width + heart_width) / 2;
+    canvas.text(left, y, MADE_WITH_LOVE, font, color, Align::Left);
+    canvas.text(left + text_width, y + HEART_DROP, ICON_HEART, icon_font, HEART_COLOR, Align::Left);
 }
 
 /// Returns how strongly a window paints its own colour: a light tint over a backdrop, solid without.
