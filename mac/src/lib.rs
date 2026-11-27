@@ -5,7 +5,7 @@ pub mod app;
 #[cfg(target_os = "macos")]
 pub mod bluetooth;
 #[cfg(target_os = "macos")]
-pub mod confirm_sheet;
+pub mod canvas;
 #[cfg(target_os = "macos")]
 pub mod delegate;
 #[cfg(target_os = "macos")]
@@ -17,5 +17,7 @@ pub mod settings_ui;
 pub mod startup;
 #[cfg(target_os = "macos")]
 pub mod status_icon;
+#[cfg(target_os = "macos")]
+pub mod surface;
 #[cfg(target_os = "macos")]
 pub mod theme;

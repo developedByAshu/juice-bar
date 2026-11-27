@@ -1,290 +1,1054 @@
-//! The settings window, built from standard AppKit controls so it looks and behaves like any Mac app:
-//! General (launch at login, % next to the icon, poll interval), Devices (rename, show), Reset, About.
+//! The Settings window, drawn the same way as NetSpeedGauge's: a sidebar of pages, a fixed header, and
+//! rows in rounded cards. It exists only while open. Every change applies at once.
+//!
+//! The one rule that keeps it alive: never hold the WINDOW borrow across an AppKit call that can call
+//! back. A rename box that loses focus ends its edit and sends its action, which borrows WINDOW again,
+//! and a second borrow aborts the app. So state is changed inside `with_window`, and anything that can
+//! end an edit (focus, hiding or removing a box, closing) runs after the borrow is dropped.
 
-use crate::confirm_sheet::show_confirm;
+use crate::canvas::{self, mix, Align, Font, WEIGHT_REGULAR, WEIGHT_SEMIBOLD};
 use crate::delegate::{delegate, main_thread, start_timer};
-use crate::startup;
-use juicebar_shared::device::Device;
+use crate::surface::{self, SettingsView, KEY_ESCAPE};
+use crate::theme::{apply_title_bar, current_theme, dark_theme, draw_made_with_love, light_theme, Theme};
+use crate::{app, startup};
+use juicebar_shared::device::{Connection, Device, DeviceKind};
+use juicebar_shared::names::short_name;
 use juicebar_shared::settings::Settings;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
-use objc2::{sel, MainThreadOnly};
-use objc2_app_kit::{
-    NSApplication, NSBackingStoreType, NSButton, NSControlStateValueOff, NSControlStateValueOn, NSFont, NSLayoutAttribute, NSPopUpButton, NSStackView,
-    NSStackViewDistribution, NSTextField, NSUserInterfaceLayoutOrientation, NSView, NSWindow, NSWindowStyleMask,
-};
-use objc2_foundation::{NSEdgeInsets, NSPoint, NSRect, NSSize, NSString};
+use objc2::sel;
+use objc2_app_kit::{NSApplication, NSControl, NSFocusRingType, NSTextField, NSWindow};
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
 
-const TAG_LAUNCH_AT_LOGIN: isize = 1;
-const TAG_SHOW_PERCENT: isize = 2;
-const TAG_POLL: isize = 3;
-const TAG_RENAME_BASE: isize = 100;
-const TAG_SHOW_BASE: isize = 200;
-const POLL_CHOICES: [u32; 6] = [1, 2, 5, 10, 15, 30];
-const WINDOW_WIDTH: f64 = 460.0;
+const WINDOW_TITLE: &str = "Juice Bar Settings";
+const WIDTH: i32 = 680;
+const HEIGHT: i32 = 640;
+const SIDEBAR_WIDTH: i32 = 176;
+const MARGIN: i32 = 20;
+const HEADER_HEIGHT: i32 = 62;
+const ROW_HEIGHT: i32 = 50;
+const ROW_GAP: i32 = 4;
+const SECTION_GAP: i32 = 34;
+const NOTE_HEIGHT: i32 = 46;
+const ABOUT_CARD_HEIGHT: i32 = 96;
+const APP_TILE: i32 = 64;
+const APP_GLASS_HEIGHT: i32 = 40;
+const PRIVACY_LINE: i32 = 26;
+const PRIVACY_HEADER_HEIGHT: i32 = 68;
+const LOCK_TILE: i32 = 40;
+const CARD_RADIUS: i32 = 6;
+const NAV_TOP: i32 = 62;
+const NAV_ROW: i32 = 40;
+// Space each side of a segment's text. The system font runs wider than Windows', so this is tighter than there.
+const SEGMENT_PADDING: i32 = 8;
+const TOGGLE_WIDTH: i32 = 40;
+const FIELD_WIDTH: i32 = 160;
+const FIELD_HEIGHT: i32 = 30;
+const FIELD_GAP: i32 = 16;
+// The real text box sits inside the drawn box, inset so its text lines up with the row's own text.
+const FIELD_INSET_X: i32 = 8;
+const FIELD_TEXT_HEIGHT: i32 = 18;
+const CONFIRM_WIDTH: i32 = 400;
+const CONFIRM_HEIGHT: i32 = 184;
+const BUTTON_HEIGHT: i32 = 30;
 const RESET_NOTE_SECONDS: f64 = 4.0;
+const FIELD_TAG_BASE: isize = 100;
+const PLACEHOLDER: &str = "Rename";
+const ICON_CHECK: &str = "checkmark";
+const ICON_DONE: &str = "checkmark.circle.fill";
+const ICON_LOCK: &str = "lock.fill";
+const ICON_RESET: &str = "arrow.counterclockwise";
+
+/// The pages in the sidebar, with their icon and title.
+const PAGES: [(&str, &str); 4] = [("gearshape", "General"), ("computermouse", "Devices"), ("arrow.counterclockwise", "Reset"), ("info.circle", "Details")];
+const DEVICES_PAGE: usize = 1;
+const RESET_PAGE: usize = 2;
+
+/// The check intervals offered, in minutes, with their labels.
+const POLL_CHOICES: [u32; 6] = [1, 2, 5, 10, 15, 30];
+const POLL_LABELS: [&str; 6] = ["1 m", "2 m", "5 m", "10 m", "15 m", "30 m"];
+
+/// What Juice Bar does and does not do with data, shown on the Details page.
+const PRIVACY_LINES: [&str; 4] = [
+    "Nothing leaves this Mac. It never connects to the internet.",
+    "It only reads battery levels from your mice and keyboards.",
+    "Your names and settings are stored only on this computer.",
+    "No account, no tracking, no ads and no servers.",
+];
+
+const APP_NAME: &str = "Juice Bar";
+const DEVELOPER_NAME: &str = "Ashutosh Anand";
+const DEVELOPER_ORIGIN: &str = "From India";
+const APP_TAGLINE: &str = "Mouse and keyboard battery in the menu bar.";
+const RESET_DETAIL: [&str; 2] = ["Names, hidden devices, the check interval and the %", "next to the icon go back to their defaults."];
+
+/// One row on a page.
+#[derive(Clone, Copy)]
+enum Row {
+    Section(&'static str),
+    Note(&'static str),
+    LaunchAtLogin,
+    ShowPercent,
+    PollInterval,
+    DeviceList,
+    ResetAll,
+    AboutCard,
+    Privacy,
+    Developer,
+}
+
+const GENERAL_ROWS: &[Row] = &[Row::Section("Startup"), Row::LaunchAtLogin, Row::Section("Menu bar"), Row::ShowPercent, Row::Section("Checks"), Row::PollInterval];
+const DEVICES_ROWS: &[Row] = &[
+    Row::Section("Your devices"),
+    Row::Note("Type a name to change how a device shows in the menu.\nSwitch a device off to leave it out of the menu and the icon."),
+    Row::DeviceList,
+];
+const RESET_ROWS: &[Row] = &[Row::Section("Reset"), Row::ResetAll];
+const ABOUT_ROWS: &[Row] = &[Row::AboutCard, Row::Section("Privacy"), Row::Privacy, Row::Section("Know your developer"), Row::Developer];
+
+fn page_rows(page: usize) -> &'static [Row] {
+    match page {
+        0 => GENERAL_ROWS,
+        DEVICES_PAGE => DEVICES_ROWS,
+        RESET_PAGE => RESET_ROWS,
+        _ => ABOUT_ROWS,
+    }
+}
+
+/// What a click on an area does.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Action {
+    Page(usize),
+    ToggleLaunchAtLogin,
+    TogglePercent,
+    SetPoll(u32),
+    ToggleShown(usize),
+    AskReset,
+    CancelReset,
+    ConfirmReset,
+}
+
+#[derive(Clone, Copy)]
+struct HitArea {
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    action: Action,
+}
+
+/// The pointer to show over a spot.
+pub enum Cursor {
+    Arrow,
+    Hand,
+    Text,
+}
+
+struct Fonts {
+    body: Font,
+    strong: Font,
+    small: Font,
+    title: Font,
+}
+
+impl Fonts {
+    fn new() -> Self {
+        Self {
+            body: Font::system(10.0, WEIGHT_REGULAR),
+            strong: Font::system(10.0, WEIGHT_SEMIBOLD),
+            small: Font::system(9.0, WEIGHT_REGULAR),
+            title: Font::system(16.0, WEIGHT_SEMIBOLD),
+        }
+    }
+}
+
+/// What a click asks for once the WINDOW borrow is dropped.
+#[derive(Default)]
+struct Effects {
+    apply: Option<Settings>,
+    sync_fields: bool,
+    layout: bool,
+    starts_done_timer: bool,
+}
 
 struct SettingsWindow {
     window: Retained<NSWindow>,
+    view: Retained<SettingsView>,
+    settings: Settings,
+    /// Every device found, under its own name (not the user's rename), in menu order.
     devices: Vec<Device>,
-    reset_note: Retained<NSTextField>,
+    /// One rename box per device, in the same order.
+    fields: Vec<Retained<NSTextField>>,
+    fonts: Fonts,
+    theme: Theme,
+    page: usize,
+    scroll: i32,
+    content_height: i32,
+    hits: Vec<HitArea>,
+    hover: Option<Action>,
+    is_confirming_reset: bool,
+    is_reset_done: bool,
+    done_timer: Option<Retained<NSTimer>>,
 }
 
 thread_local! {
     static WINDOW: RefCell<Option<SettingsWindow>> = const { RefCell::new(None) };
 }
 
-fn label(text: &str, is_heading: bool) -> Retained<NSTextField> {
-    let field = NSTextField::labelWithString(&NSString::from_str(text), main_thread());
-    if is_heading {
-        field.setFont(Some(&NSFont::boldSystemFontOfSize(NSFont::systemFontSize())));
-    } else {
-        field.setTextColor(Some(&objc2_app_kit::NSColor::secondaryLabelColor()));
+/// Runs `action` on the open window's state. Returns None when there is no window or it is already borrowed.
+fn with_window<T>(action: impl FnOnce(&mut SettingsWindow) -> T) -> Option<T> {
+    WINDOW.with(|cell| cell.try_borrow_mut().ok().and_then(|mut state| state.as_mut().map(action)))
+}
+
+fn content_left() -> i32 {
+    SIDEBAR_WIDTH + MARGIN - 4
+}
+
+fn content_width() -> i32 {
+    WIDTH - SIDEBAR_WIDTH - MARGIN * 2 + 4
+}
+
+fn privacy_height() -> i32 {
+    PRIVACY_HEADER_HEIGHT + PRIVACY_LINE * PRIVACY_LINES.len() as i32 + 20
+}
+
+/// Splits a note into its two lines.
+fn split_note(text: &'static str) -> (&'static str, &'static str) {
+    text.split_once('\n').unwrap_or((text, ""))
+}
+
+/// Returns the line under a device's name: what it is, how it is connected and its battery.
+fn device_hint(device: &Device) -> String {
+    let kind = match device.kind {
+        DeviceKind::Mouse => "Mouse",
+        DeviceKind::Keyboard => "Keyboard",
+        DeviceKind::Other => "Device",
+    };
+    let link = match device.connection {
+        Connection::Dongle => "USB receiver",
+        Connection::Bluetooth => "Bluetooth",
+        Connection::Usb => "cable",
+    };
+    let level = match device.battery {
+        Some(battery) if battery.is_charging => format!("{}%, charging", battery.percent),
+        Some(battery) => format!("{}%", battery.percent),
+        None => "no reading yet".to_string(),
+    };
+    format!("{kind}, {link}, {level}")
+}
+
+impl SettingsWindow {
+    fn add_hit(&mut self, x: i32, y: i32, width: i32, height: i32, action: Action) {
+        self.hits.push(HitArea { x, y, width, height, action });
+    }
+
+    fn is_hover(&self, action: Action) -> bool {
+        self.hover == Some(action)
+    }
+
+    fn invalidate(&self) {
+        self.view.setNeedsDisplay(true);
+    }
+
+    /// Returns how tall a row is, gap below included.
+    fn row_height(&self, row: Row) -> i32 {
+        match row {
+            Row::Section(_) => SECTION_GAP + 8,
+            Row::Note(_) => NOTE_HEIGHT,
+            Row::LaunchAtLogin | Row::ShowPercent | Row::PollInterval | Row::ResetAll => ROW_HEIGHT + ROW_GAP,
+            Row::DeviceList => self.devices.len().max(1) as i32 * (ROW_HEIGHT + ROW_GAP),
+            Row::AboutCard => ABOUT_CARD_HEIGHT + ROW_GAP,
+            Row::Privacy => privacy_height() + ROW_GAP,
+            Row::Developer => ROW_HEIGHT + ROW_GAP,
+        }
+    }
+
+    /// Returns where each rename box goes, or None when it must be hidden: another page, under the header, or behind the confirm card.
+    fn field_frames(&self) -> Vec<Option<NSRect>> {
+        let mut frames = vec![None; self.fields.len()];
+        if self.page != DEVICES_PAGE || self.is_confirming_reset {
+            return frames;
+        }
+        let mut y = HEADER_HEIGHT - self.scroll;
+        for row in page_rows(self.page) {
+            if matches!(row, Row::DeviceList) {
+                break;
+            }
+            y += self.row_height(*row);
+        }
+        let box_x = content_left() + content_width() - 14 - TOGGLE_WIDTH - FIELD_GAP - FIELD_WIDTH;
+        for (index, frame) in frames.iter_mut().enumerate() {
+            let box_y = y + index as i32 * (ROW_HEIGHT + ROW_GAP) + (ROW_HEIGHT - FIELD_HEIGHT) / 2;
+            if box_y < HEADER_HEIGHT || box_y + FIELD_HEIGHT > HEIGHT {
+                continue;
+            }
+            let text_y = box_y + (FIELD_HEIGHT - FIELD_TEXT_HEIGHT) / 2;
+            *frame = Some(NSRect::new(
+                NSPoint::new(f64::from(box_x + FIELD_INSET_X), f64::from(text_y)),
+                NSSize::new(f64::from(FIELD_WIDTH - FIELD_INSET_X * 2), f64::from(FIELD_TEXT_HEIGHT)),
+            ));
+        }
+        frames
+    }
+
+    /// Checks whether a point is on a drawn rename box, edge included.
+    fn is_over_field(&self, x: i32, y: i32) -> bool {
+        self.field_frames().iter().flatten().any(|frame| {
+            let left = frame.origin.x as i32 - FIELD_INSET_X;
+            let top = frame.origin.y as i32 - (FIELD_HEIGHT - FIELD_TEXT_HEIGHT) / 2;
+            x >= left && x < left + FIELD_WIDTH && y >= top && y < top + FIELD_HEIGHT
+        })
+    }
+
+    /// Paints the window: the page first, then the fixed header and sidebar over anything scrolled under them.
+    fn draw(&mut self) {
+        let theme = self.theme;
+        self.hits.clear();
+        canvas::round_rect(0, 0, WIDTH, HEIGHT, 0.0, theme.background);
+        self.draw_page();
+        self.hits.retain(|hit| hit.y + hit.height > HEADER_HEIGHT);
+        canvas::round_rect(SIDEBAR_WIDTH, 0, WIDTH - SIDEBAR_WIDTH, HEADER_HEIGHT, 0.0, theme.background);
+        canvas::text(SIDEBAR_WIDTH + MARGIN - 4, 20, PAGES[self.page].1, &self.fonts.title, theme.text, Align::Left);
+        self.draw_sidebar();
+        self.draw_scrollbar();
+        if self.is_confirming_reset {
+            self.draw_confirm_card();
+        }
+    }
+
+    fn draw_sidebar(&mut self) {
+        let theme = self.theme;
+        canvas::round_rect(0, 0, SIDEBAR_WIDTH, HEIGHT, 0.0, mix(theme.background, theme.card, 0.45));
+        canvas::text(18, 22, APP_NAME, &self.fonts.strong, theme.muted, Align::Left);
+        for (position, (icon, label)) in PAGES.iter().enumerate() {
+            let y = NAV_TOP + position as i32 * NAV_ROW;
+            let (x, width, height) = (8, SIDEBAR_WIDTH - 16, NAV_ROW - 4);
+            let is_selected = position == self.page;
+            let action = Action::Page(position);
+            if is_selected || self.is_hover(action) {
+                let fill = if is_selected { theme.selected } else { mix(theme.background, theme.selected, 0.5) };
+                canvas::round_rect(x, y, width, height, CARD_RADIUS as f32, fill);
+            }
+            if is_selected {
+                canvas::round_rect(x, y + 10, 3, height - 20, 2.0, theme.accent);
+            }
+            canvas::symbol(x + 20, y + height / 2, icon, 10.0, if is_selected { theme.text } else { theme.muted });
+            let font = if is_selected { &self.fonts.strong } else { &self.fonts.body };
+            canvas::text(x + 38, y + 9, label, font, theme.text, Align::Left);
+            self.add_hit(x, y, width, height, action);
+        }
+        draw_made_with_love(SIDEBAR_WIDTH / 2, HEIGHT - 34, &self.fonts.small, theme.muted);
+    }
+
+    fn draw_scrollbar(&self) {
+        let view = HEIGHT - HEADER_HEIGHT;
+        if self.content_height <= view {
+            return;
+        }
+        let thumb_height = (view * view / self.content_height).max(30);
+        let thumb_y = HEADER_HEIGHT + (view - thumb_height) * self.scroll / (self.content_height - view).max(1);
+        canvas::round_rect(WIDTH - 7, thumb_y, 3, thumb_height, 2.0, mix(self.theme.background, self.theme.muted, 0.5));
+    }
+
+    /// Draws every row of the current page, top to bottom, and works out how tall the page is.
+    fn draw_page(&mut self) {
+        let (left, width) = (content_left(), content_width());
+        let mut y = HEADER_HEIGHT - self.scroll;
+        for row in page_rows(self.page) {
+            self.draw_row(*row, left, y, width);
+            y += self.row_height(*row);
+        }
+        self.content_height = y + self.scroll - HEADER_HEIGHT + MARGIN;
+    }
+
+    fn row_card(&self, left: i32, y: i32, width: i32, height: i32) {
+        canvas::round_rect(left, y, width, height, CARD_RADIUS as f32, self.theme.card);
+    }
+
+    /// Draws a row's label, with its hint under it when there is one.
+    fn row_label(&self, left: i32, y: i32, label: &str, hint: &str) {
+        let theme = self.theme;
+        let x = left + 14;
+        if hint.is_empty() {
+            canvas::text(x, y + 15, label, &self.fonts.body, theme.text, Align::Left);
+        } else {
+            canvas::text(x, y + 7, label, &self.fonts.body, theme.text, Align::Left);
+            canvas::text(x, y + 27, hint, &self.fonts.small, theme.muted, Align::Left);
+        }
+    }
+
+    fn draw_row(&mut self, row: Row, left: i32, y: i32, width: i32) {
+        match row {
+            Row::Section(title) => canvas::text(left + 2, y + 14, title, &self.fonts.strong, self.theme.text, Align::Left),
+            Row::Note(text) => {
+                let (first, second) = split_note(text);
+                canvas::text(left + 2, y + 2, first, &self.fonts.small, self.theme.muted, Align::Left);
+                canvas::text(left + 2, y + 19, second, &self.fonts.small, self.theme.muted, Align::Left);
+            }
+            Row::LaunchAtLogin => {
+                let is_on = startup::is_enabled();
+                self.draw_toggle_row(left, y, width, ("Start at login", "Opens Juice Bar when you log in"), is_on, Action::ToggleLaunchAtLogin);
+            }
+            Row::ShowPercent => {
+                let is_on = self.settings.shows_percent_in_icon;
+                self.draw_toggle_row(left, y, width, ("Show the lowest %", "Next to the glass in the menu bar"), is_on, Action::TogglePercent);
+            }
+            Row::PollInterval => {
+                self.row_card(left, y, width, ROW_HEIGHT);
+                self.row_label(left, y, "Check batteries every", "");
+                self.draw_poll_segments(left + width - 14, y);
+            }
+            Row::DeviceList => self.draw_device_list(left, y, width),
+            Row::ResetAll => self.draw_reset_row(left, y, width),
+            Row::AboutCard => self.draw_about_card(left, y, width),
+            Row::Developer => {
+                self.row_card(left, y, width, ROW_HEIGHT);
+                self.row_label(left, y, DEVELOPER_NAME, DEVELOPER_ORIGIN);
+            }
+            Row::Privacy => {
+                self.row_card(left, y, width, privacy_height());
+                self.draw_privacy_header(left, y, width);
+                for (position, line) in PRIVACY_LINES.iter().enumerate() {
+                    let line_y = y + PRIVACY_HEADER_HEIGHT + 10 + position as i32 * PRIVACY_LINE;
+                    canvas::symbol(left + 20, line_y + 10, ICON_CHECK, 8.0, self.theme.accent);
+                    canvas::text(left + 36, line_y, line, &self.fonts.body, self.theme.text, Align::Left);
+                }
+            }
+        }
+    }
+
+    /// Draws a row with a label, a hint and a toggle. The whole card takes the click, as in NetSpeedGauge.
+    fn draw_toggle_row(&mut self, left: i32, y: i32, width: i32, (label, hint): (&str, &str), is_on: bool, action: Action) {
+        self.row_card(left, y, width, ROW_HEIGHT);
+        self.row_label(left, y, label, hint);
+        self.draw_toggle(left + width - 14, y, ROW_HEIGHT, is_on);
+        self.add_hit(left, y, width, ROW_HEIGHT, action);
+    }
+
+    fn draw_toggle(&self, right: i32, y: i32, row_height: i32, is_on: bool) {
+        let theme = self.theme;
+        let (width, height) = (TOGGLE_WIDTH, 20);
+        let (x, top) = (right - width, y + (row_height - height) / 2);
+        if is_on {
+            canvas::round_rect(x, top, width, height, height as f32 / 2.0, theme.accent);
+        } else {
+            canvas::round_rect(x, top, width, height, height as f32 / 2.0, theme.muted);
+            canvas::round_rect(x + 1, top + 1, width - 2, height - 2, (height - 2) as f32 / 2.0, theme.card);
+        }
+        let knob = 12;
+        let knob_x = if is_on { x + width - knob - 4 } else { x + 4 };
+        let on_knob = if theme.is_dark { 0x1B1B1B } else { 0xFFFFFF };
+        let knob_color = if is_on { on_knob } else { theme.muted };
+        canvas::round_rect(knob_x, top + (height - knob) / 2, knob, knob, knob as f32 / 2.0, knob_color);
+    }
+
+    fn draw_poll_segments(&mut self, right: i32, y: i32) {
+        let theme = self.theme;
+        let widths: Vec<i32> = POLL_LABELS.iter().map(|option| canvas::text_width(option, &self.fonts.strong) + SEGMENT_PADDING * 2).collect();
+        let total: i32 = widths.iter().sum();
+        let (height, top) = (32, y + 9);
+        let mut x = right - total;
+        let radius = CARD_RADIUS as f32;
+        canvas::round_rect(x, top, total, height, radius, theme.segment_track_on_card);
+        let inset = 3;
+        for (position, option) in POLL_LABELS.iter().enumerate() {
+            let segment = widths[position];
+            let action = Action::SetPoll(POLL_CHOICES[position]);
+            let is_selected = self.settings.poll_minutes == POLL_CHOICES[position];
+            if is_selected {
+                canvas::round_rect(x + inset, top + inset, segment - inset * 2, height - inset * 2, radius - inset as f32 / 2.0, theme.segment_selected);
+            }
+            let color = if is_selected || self.is_hover(action) { theme.text } else { theme.muted };
+            let font = if is_selected { &self.fonts.strong } else { &self.fonts.body };
+            canvas::text(x + segment / 2, top + 6, option, font, color, Align::Center);
+            self.add_hit(x, top, segment, height, action);
+            x += segment;
+        }
+    }
+
+    /// Draws one row per device: its full name and details, a rename box, and a Show toggle.
+    fn draw_device_list(&mut self, left: i32, y: i32, width: i32) {
+        let theme = self.theme;
+        if self.devices.is_empty() {
+            self.row_card(left, y, width, ROW_HEIGHT);
+            self.row_label(left, y, "No wireless mouse or keyboard found yet", "Plug in its USB receiver or connect it over Bluetooth");
+            return;
+        }
+        let toggle_right = left + width - 14;
+        let box_x = toggle_right - TOGGLE_WIDTH - FIELD_GAP - FIELD_WIDTH;
+        let room = box_x - 12 - (left + 14);
+        for (index, device) in self.devices.clone().iter().enumerate() {
+            let row_y = y + index as i32 * (ROW_HEIGHT + ROW_GAP);
+            self.row_card(left, row_y, width, ROW_HEIGHT);
+            // The full name when it fits, and the menu's shortened name only when it does not.
+            let name = if canvas::text_width(&device.name, &self.fonts.body) <= room { device.name.clone() } else { short_name(&device.name) };
+            self.row_label(left, row_y, &name, &device_hint(device));
+            canvas::round_rect(box_x, row_y + (ROW_HEIGHT - FIELD_HEIGHT) / 2, FIELD_WIDTH, FIELD_HEIGHT, CARD_RADIUS as f32, theme.segment_track_on_card);
+            let is_shown = !self.settings.hidden.contains(&device.id);
+            self.draw_toggle(toggle_right, row_y, ROW_HEIGHT, is_shown);
+            self.add_hit(toggle_right - TOGGLE_WIDTH - 8, row_y, TOGGLE_WIDTH + 22, ROW_HEIGHT, Action::ToggleShown(index));
+        }
+    }
+
+    /// Draws a button whose right edge is at `right` and returns its width.
+    fn draw_button(&mut self, right: i32, y: i32, label: &str, (fill, text): (u32, u32), action: Action) -> i32 {
+        let width = canvas::text_width(label, &self.fonts.body) + 28;
+        canvas::round_rect(right - width, y, width, BUTTON_HEIGHT, CARD_RADIUS as f32, fill);
+        canvas::text(right - width / 2, y + 5, label, &self.fonts.body, text, Align::Center);
+        self.add_hit(right - width, y, width, BUTTON_HEIGHT, action);
+        width
+    }
+
+    /// Draws the reset row. Just after a reset its hint turns into a green "done" line for a few seconds.
+    fn draw_reset_row(&mut self, left: i32, y: i32, width: i32) {
+        let theme = self.theme;
+        self.row_card(left, y, width, ROW_HEIGHT);
+        if self.is_reset_done {
+            canvas::text(left + 14, y + 7, "Reset all settings", &self.fonts.body, theme.text, Align::Left);
+            canvas::symbol(left + 20, y + 27 + self.fonts.small.box_height / 2, ICON_DONE, 8.0, theme.good);
+            canvas::text(left + 30, y + 27, "Done. Every setting is back to its default.", &self.fonts.small, theme.good, Align::Left);
+        } else {
+            self.row_label(left, y, "Reset all settings", "Names, hidden devices, the interval and the %");
+        }
+        let fill = if self.is_hover(Action::AskReset) { theme.button_hover } else { theme.button };
+        self.draw_button(left + width - 14, y + (ROW_HEIGHT - BUTTON_HEIGHT) / 2, "Reset all", (fill, theme.text), Action::AskReset);
+    }
+
+    /// Draws the app card: the Juice Bar glass on a tinted tile, the name, a line about it and the version.
+    fn draw_about_card(&self, left: i32, y: i32, width: i32) {
+        let theme = self.theme;
+        self.row_card(left, y, width, ABOUT_CARD_HEIGHT);
+        let (tile_x, tile_y) = (left + 16, y + (ABOUT_CARD_HEIGHT - APP_TILE) / 2);
+        canvas::round_rect(tile_x, tile_y, APP_TILE, APP_TILE, 14.0, mix(theme.card, theme.good, 0.14));
+        let glass_width = APP_GLASS_HEIGHT * 16 / 18;
+        canvas::glass(tile_x + (APP_TILE - glass_width) / 2, tile_y + (APP_TILE - APP_GLASS_HEIGHT) / 2, APP_GLASS_HEIGHT, theme.text, theme.good, Some(70));
+        let x = tile_x + APP_TILE + 16;
+        let version = format!("Version {}", juicebar_shared::APP_VERSION);
+        canvas::text(x, y + 14, APP_NAME, &self.fonts.title, theme.text, Align::Left);
+        canvas::text(x, y + 46, APP_TAGLINE, &self.fonts.body, theme.muted, Align::Left);
+        canvas::text(x, y + 68, &version, &self.fonts.small, theme.muted, Align::Left);
+    }
+
+    /// Draws the top of the privacy card: a lock on a tinted tile, its promise, and a dividing line.
+    fn draw_privacy_header(&self, left: i32, y: i32, width: i32) {
+        let theme = self.theme;
+        let (tile_x, tile_y) = (left + 14, y + 14);
+        canvas::round_rect(tile_x, tile_y, LOCK_TILE, LOCK_TILE, (CARD_RADIUS + 2) as f32, mix(theme.card, theme.accent, 0.18));
+        canvas::symbol(tile_x + LOCK_TILE / 2, tile_y + LOCK_TILE / 2, ICON_LOCK, 13.0, theme.accent);
+        let text_x = tile_x + LOCK_TILE + 12;
+        canvas::text(text_x, tile_y + 1, "Your data stays with you", &self.fonts.strong, theme.text, Align::Left);
+        canvas::text(text_x, tile_y + 21, "Private and stored only on this Mac", &self.fonts.small, theme.muted, Align::Left);
+        canvas::round_rect(left + 14, y + PRIVACY_HEADER_HEIGHT, width - 28, 1, 0.0, theme.border);
+    }
+
+    /// Dims the window and draws the reset question on a card in the middle. Only its two buttons take clicks.
+    fn draw_confirm_card(&mut self) {
+        let theme = self.theme;
+        self.hits.clear();
+        canvas::fade_round_rect(0, 0, WIDTH, HEIGHT, 0.0, 0x000000, if theme.is_dark { 0.5 } else { 0.25 });
+        let (x, y) = ((WIDTH - CONFIRM_WIDTH) / 2, (HEIGHT - CONFIRM_HEIGHT) / 2 - 20);
+        let radius = (CARD_RADIUS + 4) as f32;
+        canvas::round_rect(x - 1, y - 1, CONFIRM_WIDTH + 2, CONFIRM_HEIGHT + 2, radius + 1.0, theme.border);
+        canvas::round_rect(x, y, CONFIRM_WIDTH, CONFIRM_HEIGHT, radius, theme.card);
+        let (tile_x, tile_y) = (x + 20, y + 20);
+        canvas::round_rect(tile_x, tile_y, LOCK_TILE, LOCK_TILE, (CARD_RADIUS + 2) as f32, mix(theme.card, theme.danger, 0.16));
+        canvas::symbol(tile_x + LOCK_TILE / 2, tile_y + LOCK_TILE / 2, ICON_RESET, 13.0, theme.danger);
+        let text_x = tile_x + LOCK_TILE + 12;
+        canvas::text(text_x, tile_y + 1, "Reset all settings?", &self.fonts.strong, theme.text, Align::Left);
+        canvas::text(text_x, tile_y + 21, "This cannot be undone", &self.fonts.small, theme.muted, Align::Left);
+        for (position, line) in RESET_DETAIL.iter().enumerate() {
+            canvas::text(x + 20, y + 76 + position as i32 * 20, line, &self.fonts.body, theme.text, Align::Left);
+        }
+        let button_y = y + CONFIRM_HEIGHT - 20 - BUTTON_HEIGHT;
+        let right = x + CONFIRM_WIDTH - 20;
+        let reset_fill = if self.is_hover(Action::ConfirmReset) { mix(theme.danger, 0x000000, 0.12) } else { theme.danger };
+        let reset_width = self.draw_button(right, button_y, "Reset", (reset_fill, 0xFFFFFF), Action::ConfirmReset);
+        let cancel_fill = if self.is_hover(Action::CancelReset) { theme.button_hover } else { theme.button };
+        self.draw_button(right - reset_width - 10, button_y, "Cancel", (cancel_fill, theme.text), Action::CancelReset);
+    }
+
+    /// Changes the state for a click and returns what must happen once the borrow is dropped.
+    fn handle_click(&mut self, x: i32, y: i32) -> Effects {
+        let mut effects = Effects::default();
+        let Some(action) = self.action_at(x, y) else {
+            return effects;
+        };
+        match action {
+            Action::Page(page) => {
+                self.page = page;
+                self.scroll = 0;
+                effects.layout = true;
+            }
+            Action::ToggleLaunchAtLogin => startup::set_enabled(!startup::is_enabled()),
+            Action::TogglePercent => {
+                self.settings.shows_percent_in_icon = !self.settings.shows_percent_in_icon;
+                effects.apply = Some(self.settings.clone());
+            }
+            Action::SetPoll(minutes) => {
+                self.settings.poll_minutes = minutes;
+                effects.apply = Some(self.settings.clone());
+            }
+            Action::ToggleShown(index) => {
+                let Some(id) = self.devices.get(index).map(|device| device.id.clone()) else {
+                    return effects;
+                };
+                if self.settings.hidden.contains(&id) {
+                    self.settings.hidden.retain(|hidden| hidden != &id);
+                } else {
+                    self.settings.hidden.push(id);
+                }
+                effects.apply = Some(self.settings.clone());
+            }
+            Action::AskReset => {
+                self.is_confirming_reset = true;
+                self.is_reset_done = false;
+                effects.layout = true;
+            }
+            Action::CancelReset => {
+                self.is_confirming_reset = false;
+                effects.layout = true;
+            }
+            Action::ConfirmReset => {
+                let fresh = Settings { is_saved_to_disk: self.settings.is_saved_to_disk, ..Settings::default() };
+                self.settings = fresh.clone();
+                self.is_confirming_reset = false;
+                self.is_reset_done = true;
+                effects = Effects { apply: Some(fresh), sync_fields: true, layout: true, starts_done_timer: true };
+            }
+        }
+        self.hover = None;
+        self.invalidate();
+        effects
+    }
+
+    /// Returns what is under the mouse. The newest areas sit on top, so they are checked first.
+    fn action_at(&self, x: i32, y: i32) -> Option<Action> {
+        self.hits.iter().rev().find(|hit| x >= hit.x && x < hit.x + hit.width && y >= hit.y && y < hit.y + hit.height).map(|hit| hit.action)
+    }
+}
+
+/// Saves the settings and applies them everywhere. If the app state is busy (a scan's redraw ended an edit), it runs a moment later.
+fn apply(settings: Settings) {
+    if !app::apply_settings(settings.clone()) {
+        dispatch2::DispatchQueue::main().exec_async(move || {
+            app::apply_settings(settings);
+        });
+    }
+}
+
+/// Ends any rename in progress, which sends that box's action. Must run with WINDOW unborrowed.
+fn end_editing() {
+    let Some((window, view)) = with_window(|state| (state.window.clone(), state.view.clone())) else {
+        return;
+    };
+    window.makeFirstResponder(Some(&view));
+}
+
+/// Moves, shows and hides the rename boxes to match the page. Ends an edit first if its box is about to hide.
+fn layout_fields() {
+    let Some((placed, is_hiding_an_edit)) = with_window(|state| {
+        let placed: Vec<_> = state.fields.iter().cloned().zip(state.field_frames()).collect();
+        let is_hiding_an_edit = placed.iter().any(|(field, frame)| frame.is_none() && field.currentEditor().is_some());
+        (placed, is_hiding_an_edit)
+    }) else {
+        return;
+    };
+    if is_hiding_an_edit {
+        end_editing();
+    }
+    for (field, frame) in placed {
+        match frame {
+            Some(frame) => {
+                field.setFrame(frame);
+                field.setHidden(false);
+            }
+            None => field.setHidden(true),
+        }
+    }
+}
+
+/// Shows each device's saved rename in its box, leaving alone a box being typed in.
+fn sync_field_texts() {
+    let Some(pairs) = with_window(|state| {
+        let texts = state.devices.iter().map(|device| state.settings.renames.get(&device.id).cloned().unwrap_or_default());
+        state.fields.iter().cloned().zip(texts).collect::<Vec<_>>()
+    }) else {
+        return;
+    };
+    for (field, text) in pairs {
+        if field.currentEditor().is_none() && field.stringValue().to_string() != text {
+            field.setStringValue(&NSString::from_str(&text));
+        }
+    }
+}
+
+/// Creates one borderless rename box, styled to sit on the drawn box behind it.
+fn make_field(index: usize, text: &str, font: &Font, theme: &Theme) -> Retained<NSTextField> {
+    let field = NSTextField::textFieldWithString(&NSString::from_str(text), main_thread());
+    field.setBordered(false);
+    field.setBezeled(false);
+    field.setDrawsBackground(false);
+    field.setFocusRingType(NSFocusRingType::None);
+    field.setFont(Some(font.ns_font()));
+    field.setTag(FIELD_TAG_BASE + index as isize);
+    field.setHidden(true);
+    set_placeholder(&field, font, theme);
+    if let Some(cell) = field.cell() {
+        cell.setScrollable(true);
+        cell.setWraps(false);
+        cell.setUsesSingleLineMode(true);
+        cell.setSendsActionOnEndEditing(true);
+    }
+    let target = delegate();
+    let target: &AnyObject = target.as_ref();
+    // SAFETY: the delegate lives for the whole app and answers settingChanged:.
+    unsafe {
+        field.setTarget(Some(target));
+        field.setAction(Some(sel!(settingChanged:)));
     }
     field
 }
 
-fn checkbox(title: &str, is_on: bool, tag: isize) -> Retained<NSButton> {
-    let target = delegate();
-    let target: &AnyObject = target.as_ref();
-    // SAFETY: the delegate lives for the whole app and answers settingChanged:.
-    let button = unsafe { NSButton::checkboxWithTitle_target_action(&NSString::from_str(title), Some(target), Some(sel!(settingChanged:)), main_thread()) };
-    button.setState(if is_on { NSControlStateValueOn } else { NSControlStateValueOff });
-    button.setTag(tag);
-    button
+/// Greys the "Rename" hint in the theme's own muted colour, so it never reads as a typed name.
+fn set_placeholder(field: &NSTextField, font: &Font, theme: &Theme) {
+    let color = mix(theme.muted, theme.segment_track_on_card, 0.35);
+    field.setPlaceholderAttributedString(Some(&canvas::attributed(PLACEHOLDER, font, color)));
 }
 
-fn row(views: &[&NSView]) -> Retained<NSStackView> {
-    let stack = NSStackView::new(main_thread());
-    stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
-    stack.setSpacing(8.0);
-    views.iter().for_each(|view| stack.addArrangedSubview(view));
-    stack
+/// Recolours every rename box's hint after a theme change.
+fn refresh_placeholders() {
+    let Some((fields, theme)) = with_window(|state| (state.fields.clone(), state.theme)) else {
+        return;
+    };
+    let font = Font::system(10.0, WEIGHT_REGULAR);
+    fields.iter().for_each(|field| set_placeholder(field, &font, &theme));
 }
 
-fn poll_popup(minutes: u32) -> Retained<NSPopUpButton> {
-    let popup = NSPopUpButton::new(main_thread());
-    for choice in POLL_CHOICES {
-        let title = if choice == 1 { "1 minute".to_string() } else { format!("{choice} minutes") };
-        popup.addItemWithTitle(&NSString::from_str(&title));
-    }
-    let index = POLL_CHOICES.iter().position(|choice| *choice == minutes).unwrap_or(2);
-    popup.selectItemAtIndex(index as isize);
-    popup.setTag(TAG_POLL);
-    let target = delegate();
-    let target: &AnyObject = target.as_ref();
-    // SAFETY: the delegate lives for the whole app.
-    unsafe {
-        popup.setTarget(Some(target));
-        popup.setAction(Some(sel!(settingChanged:)));
-    }
-    popup
+/// Replaces the rename boxes with one per current device.
+fn rebuild_fields() {
+    end_editing();
+    let Some((view, old, texts, theme)) = with_window(|state| {
+        let texts: Vec<String> = state.devices.iter().map(|device| state.settings.renames.get(&device.id).cloned().unwrap_or_default()).collect();
+        (state.view.clone(), std::mem::take(&mut state.fields), texts, state.theme)
+    }) else {
+        return;
+    };
+    old.iter().for_each(|field| field.removeFromSuperview());
+    let font = Font::system(10.0, WEIGHT_REGULAR);
+    let fields: Vec<_> = texts.iter().enumerate().map(|(index, text)| make_field(index, text, &font, &theme)).collect();
+    fields.iter().for_each(|field| view.addSubview(field));
+    with_window(|state| state.fields = fields);
 }
 
-/// Builds the window's content from the current settings and rows.
-fn build_content(settings: &Settings, devices: &[Device]) -> (Retained<NSStackView>, Retained<NSTextField>) {
-    let stack = NSStackView::new(main_thread());
-    stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
-    stack.setAlignment(NSLayoutAttribute::Leading);
-    stack.setDistribution(NSStackViewDistribution::Fill);
-    stack.setSpacing(10.0);
-    stack.setEdgeInsets(NSEdgeInsets { top: 20.0, left: 24.0, bottom: 20.0, right: 24.0 });
-    stack.addArrangedSubview(&label("General", true));
-    stack.addArrangedSubview(&checkbox("Launch at login", startup::is_enabled(), TAG_LAUNCH_AT_LOGIN));
-    stack.addArrangedSubview(&checkbox("Show the lowest % next to the icon", settings.shows_percent_in_icon, TAG_SHOW_PERCENT));
-    stack.addArrangedSubview(&row(&[&label("Check batteries every", false), &poll_popup(settings.poll_minutes)]));
-    stack.addArrangedSubview(&label("Devices", true));
-    if devices.is_empty() {
-        stack.addArrangedSubview(&label("No wireless mouse or keyboard found yet.", false));
+/// Runs what a click asked for, with WINDOW unborrowed.
+fn run_effects(effects: Effects) {
+    if let Some(settings) = effects.apply {
+        apply(settings);
     }
-    let target = delegate();
-    let target: &AnyObject = target.as_ref();
-    for (index, device) in devices.iter().enumerate() {
-        let name = NSTextField::textFieldWithString(&NSString::from_str(settings.renames.get(&device.id).map_or("", String::as_str)), main_thread());
-        name.setPlaceholderString(Some(&NSString::from_str(&device.name)));
-        name.setTag(TAG_RENAME_BASE + index as isize);
-        // SAFETY: the delegate lives for the whole app.
-        unsafe {
-            name.setTarget(Some(target));
-            name.setAction(Some(sel!(settingChanged:)));
+    if effects.sync_fields {
+        sync_field_texts();
+    }
+    if effects.layout {
+        layout_fields();
+    }
+    if effects.starts_done_timer {
+        let timer = start_timer(RESET_NOTE_SECONDS, sel!(hideResetNote:), false);
+        with_window(|state| {
+            if let Some(old) = state.done_timer.replace(timer) {
+                old.invalidate();
+            }
+        });
+    }
+}
+
+pub fn draw() {
+    with_window(SettingsWindow::draw);
+}
+
+/// Reacts to the mouse moving and returns the pointer to show.
+pub fn on_mouse_move(x: i32, y: i32) -> Cursor {
+    with_window(|state| {
+        if state.is_over_field(x, y) {
+            return Cursor::Text;
         }
-        name.setFrameSize(NSSize::new(240.0, 22.0));
-        let width = name.widthAnchor().constraintEqualToConstant(240.0);
-        width.setActive(true);
-        let shown = checkbox("Show", !settings.hidden.contains(&device.id), TAG_SHOW_BASE + index as isize);
-        stack.addArrangedSubview(&row(&[&name, &shown]));
+        let hover = state.action_at(x, y);
+        if hover != state.hover {
+            state.hover = hover;
+            state.invalidate();
+        }
+        if hover.is_some() {
+            Cursor::Hand
+        } else {
+            Cursor::Arrow
+        }
+    })
+    .unwrap_or(Cursor::Arrow)
+}
+
+pub fn on_mouse_exit() {
+    with_window(|state| {
+        state.hover = None;
+        state.invalidate();
+    });
+}
+
+pub fn on_click(x: i32, y: i32) {
+    // A click anywhere else finishes a rename first, so the click then works on up to date settings.
+    end_editing();
+    if let Some(effects) = with_window(|state| state.handle_click(x, y)) {
+        run_effects(effects);
     }
-    stack.addArrangedSubview(&label("Reset", true));
-    // SAFETY: the delegate lives for the whole app.
-    let reset = unsafe { NSButton::buttonWithTitle_target_action(&NSString::from_str("Reset all settings…"), Some(target), Some(sel!(resetClicked:)), main_thread()) };
-    let reset_note = label("", false);
-    reset_note.setTextColor(Some(&objc2_app_kit::NSColor::systemGreenColor()));
-    stack.addArrangedSubview(&row(&[&reset, &reset_note]));
-    stack.addArrangedSubview(&label(&format!("Juice Bar {} · Made in India with ♥", juicebar_shared::APP_VERSION), false));
-    (stack, reset_note)
+}
+
+/// Scrolls the page by the distance the trackpad or wheel reports.
+pub fn on_scroll(delta: i32) {
+    with_window(|state| {
+        if state.is_confirming_reset {
+            return;
+        }
+        let limit = (state.content_height - (HEIGHT - HEADER_HEIGHT)).max(0);
+        state.scroll = (state.scroll - delta).clamp(0, limit);
+        state.invalidate();
+    });
+    layout_fields();
+}
+
+/// Escape closes the confirm card if it is up, or else the window.
+pub fn on_key(code: u16) {
+    if code != KEY_ESCAPE {
+        return;
+    }
+    let window = with_window(|state| {
+        if state.is_confirming_reset {
+            state.is_confirming_reset = false;
+            state.invalidate();
+            return None;
+        }
+        Some(state.window.clone())
+    });
+    match window {
+        Some(Some(window)) => window.close(),
+        Some(None) => layout_fields(),
+        None => {}
+    }
+}
+
+/// Reads a rename box into the settings and applies them.
+pub fn on_control_changed(sender: &AnyObject) {
+    // SAFETY: every control that sends settingChanged: is an NSControl.
+    let control: &NSControl = unsafe { &*(sender as *const AnyObject).cast() };
+    let Ok(index) = usize::try_from(control.tag() - FIELD_TAG_BASE) else {
+        return;
+    };
+    let text = control.stringValue().to_string();
+    let changed = with_window(|state| {
+        let id = state.devices.get(index)?.id.clone();
+        let name = text.trim();
+        if state.settings.renames.get(&id).map_or("", String::as_str) == name {
+            return None;
+        }
+        if name.is_empty() {
+            state.settings.renames.remove(&id);
+        } else {
+            state.settings.renames.insert(id, name.to_string());
+        }
+        state.invalidate();
+        Some(state.settings.clone())
+    })
+    .flatten();
+    if let Some(settings) = changed {
+        apply(settings);
+    }
+}
+
+/// Builds the window and its state without showing it.
+fn build(settings: Settings, devices: Vec<Device>) -> Retained<NSWindow> {
+    let (window, view) = surface::create_window(WIDTH, HEIGHT, WINDOW_TITLE);
+    let theme = current_theme();
+    apply_title_bar(&window, &theme);
+    let state = SettingsWindow {
+        window: window.clone(),
+        view,
+        settings,
+        devices,
+        fields: Vec::new(),
+        fonts: Fonts::new(),
+        theme,
+        page: 0,
+        scroll: 0,
+        content_height: 0,
+        hits: Vec::new(),
+        hover: None,
+        is_confirming_reset: false,
+        is_reset_done: false,
+        done_timer: None,
+    };
+    WINDOW.with(|cell| *cell.borrow_mut() = Some(state));
+    rebuild_fields();
+    layout_fields();
+    window
 }
 
 /// Opens the settings window, or brings it forward if it is open.
 pub fn open_settings() {
-    let mtm = main_thread();
-    NSApplication::sharedApplication(mtm).activate();
-    if WINDOW.with(|cell| cell.borrow().as_ref().map(|open| open.window.makeKeyAndOrderFront(None)).is_some()) {
+    NSApplication::sharedApplication(main_thread()).activate();
+    if let Some(window) = with_window(|state| state.window.clone()) {
+        window.makeKeyAndOrderFront(None);
         return;
     }
-    let Some((settings, devices)) = crate::app::settings_and_devices() else {
+    let Some((settings, devices)) = app::settings_and_devices() else {
         return;
     };
-    let style = NSWindowStyleMask::Titled | NSWindowStyleMask::Closable;
-    let frame = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(WINDOW_WIDTH, 300.0));
-    // SAFETY: standard window creation on the main thread.
-    let window = unsafe { NSWindow::initWithContentRect_styleMask_backing_defer(NSWindow::alloc(mtm), frame, style, NSBackingStoreType::Buffered, false) };
-    // SAFETY: the window is owned by WINDOW, so AppKit must not free it on close.
-    unsafe { window.setReleasedWhenClosed(false) };
-    window.setTitle(&NSString::from_str("Juice Bar Settings"));
-    let (content, reset_note) = build_content(&settings, &devices);
-    window.setContentView(Some(&content));
-    content.layoutSubtreeIfNeeded();
-    let fitting = content.fittingSize();
-    window.setContentSize(NSSize::new(WINDOW_WIDTH.max(fitting.width), fitting.height));
-    window.setDelegate(Some(objc2::runtime::ProtocolObject::from_ref(&*delegate())));
+    let window = build(settings, devices);
     window.center();
     window.makeKeyAndOrderFront(None);
-    WINDOW.with(|cell| *cell.borrow_mut() = Some(SettingsWindow { window, devices, reset_note }));
+    // macOS can refuse the activation above, and a window asked to come forward then stays hidden.
+    window.orderFrontRegardless();
 }
 
-/// Forgets the window once it closes, so the next open shows fresh rows.
+/// Forgets the window once it closes, so the next open shows fresh rows. A rename being typed is kept.
 pub fn on_closed() {
-    WINDOW.with(|cell| cell.borrow_mut().take());
-}
-
-/// Reads one changed control into the settings and applies them.
-pub fn on_control_changed(sender: &AnyObject) {
-    let Some((mut settings, _)) = crate::app::settings_and_devices() else {
-        return;
-    };
-    let devices = WINDOW.with(|cell| cell.borrow().as_ref().map(|open| open.devices.clone())).unwrap_or_default();
-    // SAFETY: every control that sends settingChanged: is an NSControl.
-    let control: &objc2_app_kit::NSControl = unsafe { &*(sender as *const AnyObject).cast() };
-    let tag = control.tag();
-    match tag {
-        TAG_LAUNCH_AT_LOGIN => startup::set_enabled(!startup::is_enabled()),
-        TAG_SHOW_PERCENT => settings.shows_percent_in_icon = !settings.shows_percent_in_icon,
-        TAG_POLL => {
-            // SAFETY: the TAG_POLL control is the popup built above.
-            let popup: &NSPopUpButton = unsafe { &*(sender as *const AnyObject).cast() };
-            settings.poll_minutes = POLL_CHOICES.get(popup.indexOfSelectedItem() as usize).copied().unwrap_or(5);
+    end_editing();
+    let closed = WINDOW.with(|cell| cell.try_borrow_mut().ok().and_then(|mut state| state.take()));
+    if let Some(state) = closed {
+        if let Some(timer) = &state.done_timer {
+            timer.invalidate();
         }
-        _ if (TAG_RENAME_BASE..TAG_SHOW_BASE).contains(&tag) => {
-            if let Some(device) = devices.get((tag - TAG_RENAME_BASE) as usize) {
-                let text = control.stringValue().to_string();
-                if text.trim().is_empty() {
-                    settings.renames.remove(&device.id);
-                } else {
-                    settings.renames.insert(device.id.clone(), text.trim().to_string());
-                }
-            }
-        }
-        _ if tag >= TAG_SHOW_BASE => {
-            if let Some(device) = devices.get((tag - TAG_SHOW_BASE) as usize) {
-                if settings.hidden.contains(&device.id) {
-                    settings.hidden.retain(|id| id != &device.id);
-                } else {
-                    settings.hidden.push(device.id.clone());
-                }
-            }
-        }
-        _ => return,
+        drop(state);
     }
-    crate::app::apply_settings(settings);
 }
 
-/// Asks inside the window before resetting, then resets, rebuilds the controls and shows a short note.
-pub fn on_reset_clicked() {
-    let Some(window) = WINDOW.with(|cell| cell.borrow().as_ref().map(|open| open.window.clone())) else {
-        return;
-    };
-    show_confirm(&window, "Reset all settings?", "Names, hidden devices, the check interval and the % next to the icon go back to their defaults.", "Reset", || {
-        let fresh = Settings::default();
-        crate::app::apply_settings(fresh.clone());
-        let Some((window, devices)) = WINDOW.with(|cell| cell.borrow().as_ref().map(|open| (open.window.clone(), open.devices.clone()))) else {
-            return;
-        };
-        let (content, note) = build_content(&fresh, &devices);
-        swap_content(&window, &content);
-        note.setStringValue(&NSString::from_str("✓ All settings are back to their defaults"));
-        WINDOW.with(|cell| {
-            if let Some(open) = cell.borrow_mut().as_mut() {
-                open.reset_note = note;
-            }
-        });
-        start_timer(RESET_NOTE_SECONDS, sel!(hideResetNote:), false);
-    });
-}
-
-/// Replaces the window content. A rename box being edited ends its edit first and sends its action,
-/// so this must run with WINDOW unborrowed, or that action borrows it again and the app aborts.
-fn swap_content(window: &NSWindow, content: &NSView) {
-    window.makeFirstResponder(None);
-    window.setContentView(Some(content));
-}
-
-/// Clears the reset note after a few seconds.
+/// Hides the reset done cue a few seconds after a reset.
 pub fn hide_reset_note() {
-    WINDOW.with(|cell| {
-        if let Some(open) = cell.borrow().as_ref() {
-            open.reset_note.setStringValue(&NSString::from_str(""));
-        }
+    with_window(|state| {
+        state.is_reset_done = false;
+        state.done_timer = None;
+        state.invalidate();
     });
 }
 
-/// Paints the settings window's content to a PNG without the screen. Used only by capture mode.
-pub fn capture_to(path: &str) -> bool {
-    WINDOW.with(|cell| {
-        let state = cell.borrow();
-        let Some(open) = state.as_ref() else {
-            return false;
-        };
-        let Some(view) = open.window.contentView() else {
-            return false;
-        };
-        // A transparent capture of dark-mode text looks blank, so captures use the light look.
-        let light = objc2_app_kit::NSAppearance::appearanceNamed(unsafe { objc2_app_kit::NSAppearanceNameAqua });
-        objc2_app_kit::NSAppearanceCustomization::setAppearance(&*open.window, light.as_deref());
-        view.layoutSubtreeIfNeeded();
-        view.displayIfNeeded();
-        let bounds = view.bounds();
-        let Some(image) = view.bitmapImageRepForCachingDisplayInRect(bounds) else {
-            return false;
-        };
-        view.cacheDisplayInRect_toBitmapImageRep(bounds, &image);
-        let no_options = objc2_foundation::NSDictionary::new();
-        // SAFETY: an empty dictionary is valid for the PNG options.
-        let data = unsafe { image.representationUsingType_properties(objc2_app_kit::NSBitmapImageFileType::PNG, &no_options) };
-        data.is_some_and(|data| data.writeToFile_atomically(&NSString::from_str(path), true))
-    })
+/// Follows the Mac switching between light and dark.
+pub fn apply_theme() {
+    let changed = with_window(|state| {
+        state.theme = current_theme();
+        state.invalidate();
+        (state.window.clone(), state.theme)
+    });
+    if let Some((window, theme)) = changed {
+        apply_title_bar(&window, &theme);
+        refresh_placeholders();
+    }
 }
 
-/// Rebuilds an open window when the set of devices changed, so new devices appear without reopening.
+/// Updates the open window when devices or settings change: new devices appear without reopening.
 pub fn on_devices_changed(settings: &Settings, devices: &[Device]) {
-    let window = WINDOW.with(|cell| {
-        let state = cell.borrow();
-        let open = state.as_ref()?;
-        let same = open.devices.len() == devices.len() && open.devices.iter().zip(devices).all(|(old, new)| old.id == new.id);
-        (!same).then(|| open.window.clone())
-    });
-    let Some(window) = window else {
+    let Some(is_new_set) = with_window(|state| state.devices.len() != devices.len() || state.devices.iter().zip(devices).any(|(old, new)| old.id != new.id)) else {
         return;
     };
-    let (content, note) = build_content(settings, devices);
-    swap_content(&window, &content);
-    content.layoutSubtreeIfNeeded();
-    let fitting = content.fittingSize();
-    window.setContentSize(NSSize::new(WINDOW_WIDTH.max(fitting.width), fitting.height));
-    WINDOW.with(|cell| {
-        if let Some(open) = cell.borrow_mut().as_mut() {
-            open.devices = devices.to_vec();
-            open.reset_note = note;
-        }
+    if is_new_set {
+        // Finish a rename while the boxes still match the old devices, so it lands on the right one.
+        end_editing();
+    }
+    with_window(|state| {
+        state.settings = settings.clone();
+        state.devices = devices.to_vec();
+        state.invalidate();
     });
+    if is_new_set {
+        rebuild_fields();
+        layout_fields();
+    }
+    sync_field_texts();
+}
+
+/// Paints the settings window to a PNG without the screen. Used by capture mode and the capture example.
+pub fn capture_to(path: &str) -> bool {
+    // The state must be free while painting, since painting reads it.
+    let Some(view) = with_window(|state| state.view.clone()) else {
+        return false;
+    };
+    surface::capture_view(&view, path)
+}
+
+/// Builds the window from given settings and devices without showing it, for checks.
+pub fn open_for_checks(settings: Settings, devices: Vec<Device>) {
+    build(settings, devices);
+}
+
+/// Switches page, for checks.
+pub fn show_page_for_checks(page: usize) {
+    with_window(|state| {
+        state.page = page.min(PAGES.len() - 1);
+        state.scroll = 0;
+        state.invalidate();
+    });
+    layout_fields();
+}
+
+/// Shows the open window in a chosen theme, for checks.
+pub fn preview_theme(is_dark: bool) {
+    let changed = with_window(|state| {
+        state.theme = if is_dark { dark_theme() } else { light_theme() };
+        state.invalidate();
+        (state.window.clone(), state.theme)
+    });
+    if let Some((window, theme)) = changed {
+        apply_title_bar(&window, &theme);
+        refresh_placeholders();
+    }
+}
+
+/// Clicks an area as a user would, for checks: "page:N", "percent", "poll:N", "show:N", "ask_reset", "cancel_reset", "confirm_reset".
+/// Returns false when no such area is showing.
+pub fn click_for_checks(name: &str) -> bool {
+    let (kind, number) = name.split_once(':').map_or((name, 0), |(kind, number)| (kind, number.parse().unwrap_or(0)));
+    let wanted = match kind {
+        "page" => Action::Page(number),
+        "percent" => Action::TogglePercent,
+        "poll" => Action::SetPoll(number as u32),
+        "show" => Action::ToggleShown(number),
+        "ask_reset" => Action::AskReset,
+        "cancel_reset" => Action::CancelReset,
+        "confirm_reset" => Action::ConfirmReset,
+        _ => return false,
+    };
+    // Painting fills in where each area is.
+    let Some(view) = with_window(|state| state.view.clone()) else {
+        return false;
+    };
+    surface::paint_off_screen(&view);
+    let position = with_window(|state| state.hits.iter().find(|hit| hit.action == wanted).map(|hit| (hit.x + hit.width / 2, hit.y + hit.height / 2))).flatten();
+    if let Some((x, y)) = position {
+        on_click(x, y);
+    }
+    position.is_some()
+}
+
+/// Puts the cursor in a device's rename box and types a name without finishing the edit, for checks.
+pub fn type_rename_for_checks(index: usize, text: &str) -> bool {
+    let Some((window, field)) = with_window(|state| state.fields.get(index).map(|field| (state.window.clone(), field.clone()))).flatten() else {
+        return false;
+    };
+    window.makeFirstResponder(Some(&field));
+    match field.currentEditor() {
+        Some(editor) => editor.setString(&NSString::from_str(text)),
+        None => field.setStringValue(&NSString::from_str(text)),
+    }
+    true
+}
+
+/// Presses Escape in the window, for checks.
+pub fn press_escape_for_checks() {
+    on_key(KEY_ESCAPE);
+}
+
+/// Returns whether the reset done cue is showing, for checks.
+pub fn is_reset_done_for_checks() -> bool {
+    with_window(|state| state.is_reset_done).unwrap_or(false)
+}
+
+/// Returns the settings the window shows, for checks.
+pub fn settings_for_checks() -> Option<Settings> {
+    with_window(|state| state.settings.clone())
 }

@@ -26,6 +26,8 @@ struct App {
     scanned: Vec<ScannedDevice>,
     bluetooth: Vec<BluetoothEntry>,
     devices: Vec<Device>,
+    /// The same devices under their own names, before the user's renames, for the settings window.
+    found: Vec<Device>,
     /// The rows in the menu, in menu order; a row's tag is its index here.
     shown: Vec<Device>,
     poll_timer: Option<Retained<NSTimer>>,
@@ -59,7 +61,7 @@ pub fn finish_startup() {
     let settings = Settings::load();
     let poll_timer = Some(start_timer(f64::from(settings.poll_minutes) * 60.0, sel!(poll:), true));
     APP.with(|cell| {
-        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false });
+        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false });
     });
     watch_system_events();
     refresh();
@@ -67,7 +69,9 @@ pub fn finish_startup() {
 }
 
 /// Capture mode for screenshots without touching the mouse: JUICEBAR_CAPTURE=menu or settings
-/// opens that view after the first scan and quits a few seconds later.
+/// opens that view after the first scan and quits a few seconds later. JUICEBAR_CAPTURE_PAGE picks the
+/// settings page (general, devices, reset, details). JUICEBAR_CAPTURE=reset walks a real reset with a
+/// rename being typed, writes JUICEBAR_CAPTURE_PATH after it, then closes the window mid edit.
 fn start_capture_if_asked() {
     match std::env::var("JUICEBAR_CAPTURE").as_deref() {
         Ok("menu") => {
@@ -76,10 +80,55 @@ fn start_capture_if_asked() {
         }
         Ok("settings") => {
             crate::settings_ui::open_settings();
+            let page = std::env::var("JUICEBAR_CAPTURE_PAGE").unwrap_or_default();
+            if let Some(index) = CAPTURE_PAGES.iter().position(|name| *name == page) {
+                crate::settings_ui::show_page_for_checks(index);
+            }
             start_timer(4.0, sel!(captureFinish:), false);
+        }
+        Ok("reset") => {
+            crate::settings_ui::open_settings();
+            start_timer(2.0, sel!(captureReset:), false);
+            start_timer(4.0, sel!(captureCloseWhileEditing:), false);
+            start_timer(6.0, sel!(captureFinish:), false);
         }
         _ => {}
     }
+}
+
+/// The settings pages capture mode can open, in sidebar order.
+const CAPTURE_PAGES: [&str; 4] = ["general", "devices", "reset", "details"];
+
+fn log_renames(step: &str) {
+    let renames = with_app(|app| app.settings.renames.clone()).unwrap_or_default();
+    eprintln!("capture: {step}: saved renames {renames:?}");
+}
+
+/// Types a rename, leaves the page mid edit, then resets everything through the confirm card. Used only by capture mode.
+pub fn capture_reset() {
+    use crate::settings_ui::{click_for_checks, is_reset_done_for_checks, show_page_for_checks, type_rename_for_checks};
+    show_page_for_checks(1);
+    eprintln!("capture: typed a rename: {}", type_rename_for_checks(0, "Desk keyboard"));
+    eprintln!("capture: opened Reset while typing: {}", click_for_checks("page:2"));
+    log_renames("after leaving the rename");
+    eprintln!("capture: asked to reset: {}", click_for_checks("ask_reset"));
+    if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_CONFIRM_PATH") {
+        eprintln!("capture: confirm card saved: {}", crate::settings_ui::capture_to(&path));
+    }
+    eprintln!("capture: confirmed the reset: {}", click_for_checks("confirm_reset"));
+    log_renames("after the reset");
+    eprintln!("capture: done cue showing: {}", is_reset_done_for_checks());
+    if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_PATH") {
+        eprintln!("capture: reset page saved: {}", crate::settings_ui::capture_to(&path));
+    }
+}
+
+/// Types a rename and closes the window with Escape before it is finished. Used only by capture mode.
+pub fn capture_close_while_editing() {
+    crate::settings_ui::show_page_for_checks(1);
+    eprintln!("capture: typed a rename: {}", crate::settings_ui::type_rename_for_checks(1, "Travel mouse"));
+    crate::settings_ui::press_escape_for_checks();
+    log_renames("after closing mid edit");
 }
 
 /// Opens the menu under the item without any click. Used only by capture mode.
@@ -93,7 +142,9 @@ pub fn capture_open_menu() {
 
 /// Closes an open menu and quits. Used only by capture mode.
 pub fn capture_finish() {
-    if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_PATH") {
+    if std::env::var("JUICEBAR_CAPTURE").as_deref() == Ok("reset") {
+        eprintln!("capture: still running after the reset, quitting");
+    } else if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_PATH") {
         crate::settings_ui::capture_to(&path);
     }
     with_app(|app| app.menu.cancelTracking());
@@ -102,24 +153,26 @@ pub fn capture_finish() {
 
 /// Rebuilds the visible rows from the last scan, then redraws the icon and an open menu.
 fn rebuild(app: &mut App) {
-    if is_demo_mode() {
-        app.devices = sample_devices(82, 15);
+    let mut rows: Vec<Device> = if is_demo_mode() {
+        sample_devices(82, 15)
     } else {
         let mut rows: Vec<Device> = app.scanned.iter().map(|scanned| scanned.device.clone()).collect();
         rows.extend(bluetooth_devices(&app.bluetooth));
-        for row in &mut rows {
-            if let Some(name) = app.settings.renames.get(&row.id) {
-                row.name = name.clone();
-            }
+        rows
+    };
+    app.found = rows.clone();
+    for row in &mut rows {
+        if let Some(name) = app.settings.renames.get(&row.id) {
+            row.name = name.clone();
         }
-        app.devices = rows;
     }
+    app.devices = rows;
     // Settings lists every device; the icon and menu leave out the hidden ones.
     let shown: Vec<Device> = app.devices.iter().filter(|device| !app.settings.hidden.contains(&device.id)).cloned().collect();
     status_icon::update_status_icon(&app.status_item, icon_tone(&shown), lowest_percent(&shown), app.settings.shows_percent_in_icon);
     menu_ui::show_menu(&app.menu, &shown);
     app.shown = shown;
-    crate::settings_ui::on_devices_changed(&app.settings, &app.devices);
+    crate::settings_ui::on_devices_changed(&app.settings, &app.found);
 }
 
 /// Work for the HID thread.
@@ -242,13 +295,14 @@ pub fn report_url_for(tag: isize) -> Option<String> {
     .flatten()
 }
 
-/// Returns a copy of the settings and the current rows, for the settings window.
+/// Returns a copy of the settings and every device under its own name, for the settings window.
 pub fn settings_and_devices() -> Option<(Settings, Vec<Device>)> {
-    with_app(|app| (app.settings.clone(), app.devices.clone()))
+    with_app(|app| (app.settings.clone(), app.found.clone()))
 }
 
 /// Saves new settings, restarts the poll if its interval changed, and redraws.
-pub fn apply_settings(settings: Settings) {
+/// Returns false when the app state was busy (or not started), so nothing was applied.
+pub fn apply_settings(settings: Settings) -> bool {
     with_app(|app| {
         let interval_changed = settings.poll_minutes != app.settings.poll_minutes;
         settings.save();
@@ -260,5 +314,6 @@ pub fn apply_settings(settings: Settings) {
             app.poll_timer = Some(start_timer(f64::from(app.settings.poll_minutes) * 60.0, sel!(poll:), true));
         }
         rebuild(app);
-    });
+    })
+    .is_some()
 }

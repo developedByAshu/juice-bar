@@ -8,6 +8,8 @@ use objc2_app_kit::{NSApplicationDelegate, NSMenu, NSMenuDelegate, NSMenuItem, N
 use objc2_foundation::{NSNotification, NSTimer};
 use std::cell::OnceCell;
 
+const SETTINGS_THEME_DELAY_SECONDS: f64 = 0.3;
+
 /// Returns the main thread marker. Every call site runs on the main thread.
 pub fn main_thread() -> MainThreadMarker {
     MainThreadMarker::new().expect("Juice Bar only runs on the main thread")
@@ -56,6 +58,13 @@ define_class!(
         #[unsafe(method(themeChanged:))]
         fn theme_changed(&self, _notification: &NSNotification) {
             app::redraw_icon();
+            // The app's own look switches a moment after this notice, so the settings window follows a little later.
+            start_timer(SETTINGS_THEME_DELAY_SECONDS, sel!(settingsThemeChanged:), false);
+        }
+
+        #[unsafe(method(settingsThemeChanged:))]
+        fn settings_theme_changed(&self, _timer: &NSTimer) {
+            settings_ui::apply_theme();
         }
 
         #[unsafe(method(openSettings:))]
@@ -83,14 +92,19 @@ define_class!(
             settings_ui::on_control_changed(sender);
         }
 
-        #[unsafe(method(resetClicked:))]
-        fn reset_clicked(&self, _sender: Option<&AnyObject>) {
-            settings_ui::on_reset_clicked();
-        }
-
         #[unsafe(method(captureOpenMenu:))]
         fn capture_open_menu(&self, _timer: &NSTimer) {
             app::capture_open_menu();
+        }
+
+        #[unsafe(method(captureReset:))]
+        fn capture_reset(&self, _timer: &NSTimer) {
+            app::capture_reset();
+        }
+
+        #[unsafe(method(captureCloseWhileEditing:))]
+        fn capture_close_while_editing(&self, _timer: &NSTimer) {
+            app::capture_close_while_editing();
         }
 
         #[unsafe(method(captureFinish:))]
