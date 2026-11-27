@@ -131,19 +131,13 @@ struct ScanRequest {
 }
 
 /// Reads every device once. Runs on the read thread, which owns the one HidApi.
+/// Devices come back under their own names; renames are applied only where a name is shown.
 fn scan(api: &mut Option<hidapi::HidApi>, request: &ScanRequest) -> ScanResult {
-    let (settings, probe_id) = (&request.settings, request.probe_id.as_deref());
+    let mut own_names = request.settings.clone();
+    own_names.renames.clear();
+    let (settings, probe_id) = (&own_names, request.probe_id.as_deref());
     if is_demo_mode() {
-        let devices = demo_devices()
-            .into_iter()
-            .map(|mut device| {
-                if let Some(name) = settings.renames.get(&device.id) {
-                    device.name = name.clone();
-                    device.name_source = NameSource::UserRename;
-                }
-                device
-            })
-            .collect();
+        let devices = demo_devices();
         return ScanResult { devices, interfaces: BTreeMap::new(), probe: probe_id.map(|id| (id.to_string(), false)) };
     }
     let mut devices = Vec::new();
@@ -178,13 +172,7 @@ fn scan(api: &mut Option<hidapi::HidApi>, request: &ScanRequest) -> ScanResult {
             devices.push(device);
         }
     }
-    for mut device in bluetooth_devices() {
-        if let Some(name) = settings.renames.get(&device.id) {
-            device.name = name.clone();
-            device.name_source = NameSource::UserRename;
-        }
-        devices.push(device);
-    }
+    devices.extend(bluetooth_devices());
     ScanResult { devices, interfaces, probe }
 }
 
@@ -268,6 +256,21 @@ pub fn keep_recent_readings(new: &mut [Device], old: &[Device], last_read: &mut 
             device.battery = old.iter().find(|previous| previous.id == device.id).and_then(|previous| previous.battery);
         }
     }
+}
+
+/// Returns the devices under the names in use: the user's rename first, else the device's own name.
+pub fn with_renames(devices: &[Device], settings: &Settings) -> Vec<Device> {
+    devices
+        .iter()
+        .cloned()
+        .map(|mut device| {
+            if let Some(name) = settings.renames.get(&device.id).filter(|name| !name.trim().is_empty()) {
+                device.name = name.clone();
+                device.name_source = NameSource::UserRename;
+            }
+            device
+        })
+        .collect()
 }
 
 /// Opens a web address in the user's browser.
@@ -397,10 +400,11 @@ impl App {
         refresh_settings();
     }
 
-    /// Returns the devices the menu shows: all but the hidden ones.
+    /// Returns the devices the menu shows: all but the hidden ones, under the names in use.
     pub fn visible_devices(&self) -> Vec<Device> {
         let settings = self.settings.borrow();
-        self.devices.borrow().iter().filter(|device| !settings.hidden.contains(&device.id)).cloned().collect()
+        let shown: Vec<Device> = self.devices.borrow().iter().filter(|device| !settings.hidden.contains(&device.id)).cloned().collect();
+        with_renames(&shown, &settings)
     }
 
     /// Reads again shortly after the computer wakes, once the dongles are back.
