@@ -22,6 +22,18 @@ pub fn is_generic_usb_name(name: &str) -> bool {
     lowered.is_empty() || GENERIC_USB_NAMES.contains(&lowered.as_str())
 }
 
+/// Longest name a menu row shows before it is cut with "…"; the full name shows on hover.
+pub const MENU_NAME_MAX_CHARS: usize = 18;
+
+/// Cuts a long name for a menu row, keeping whole characters and ending with "…".
+pub fn short_name(name: &str) -> String {
+    if name.chars().count() <= MENU_NAME_MAX_CHARS {
+        return name.to_string();
+    }
+    let kept: String = name.chars().take(MENU_NAME_MAX_CHARS - 1).collect();
+    format!("{}…", kept.trim_end())
+}
+
 /// Returns the name to show and where it came from.
 pub fn resolve_name(kind: DeviceKind, candidates: &NameCandidates) -> (String, NameSource) {
     let clean = |name: &Option<String>| name.as_ref().map(|text| text.trim().to_string()).filter(|text| !text.is_empty());

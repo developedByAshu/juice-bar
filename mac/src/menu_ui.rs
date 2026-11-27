@@ -4,6 +4,7 @@
 use crate::delegate::{delegate, main_thread};
 use crate::theme::tone_color;
 use juicebar_shared::device::{Connection, Device};
+use juicebar_shared::names::short_name;
 use juicebar_shared::tone::tone_for_percent;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -15,8 +16,8 @@ use objc2_app_kit::{
 use objc2_foundation::{NSArray, NSDictionary, NSMutableAttributedString, NSRange, NSString};
 
 /// Where the connection label and the % end, in points from the row's text start.
-const CONNECTION_TAB: f64 = 210.0;
-const PERCENT_TAB: f64 = 310.0;
+const CONNECTION_TAB: f64 = 190.0;
+const PERCENT_TAB: f64 = 255.0;
 
 /// Returns the connection label shown in each row.
 pub fn connection_label(connection: Connection) -> &'static str {
@@ -52,7 +53,8 @@ fn color_range(text: &NSMutableAttributedString, color: &NSColor, start: usize, 
 fn row_title(device: &Device) -> Retained<NSMutableAttributedString> {
     let connection = connection_label(device.connection);
     let percent = percent_label(device);
-    let plain = format!("{}\t{connection}\t{percent}", device.name);
+    let name = short_name(&device.name);
+    let plain = format!("{name}\t{connection}\t{percent}");
     let text = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &NSString::from_str(&plain));
     let whole = NSRange::new(0, utf16_length(&plain));
     let style = NSMutableParagraphStyle::new();
@@ -68,7 +70,7 @@ fn row_title(device: &Device) -> Retained<NSMutableAttributedString> {
         text.addAttribute_value_range(NSParagraphStyleAttributeName, style.as_ref(), whole);
         text.addAttribute_value_range(NSFontAttributeName, font.as_ref(), whole);
     }
-    let connection_start = utf16_length(&device.name) + 1;
+    let connection_start = utf16_length(&name) + 1;
     color_range(&text, &NSColor::secondaryLabelColor(), connection_start, utf16_length(connection));
     let percent_start = connection_start + utf16_length(connection) + 1;
     let percent_color = match device.battery {
@@ -99,6 +101,7 @@ pub fn build_device_row(device: &Device, index: usize) -> Vec<Retained<NSMenuIte
     let tag = index as isize;
     let row = action_item(&device.name, sel!(rowClicked:), "", tag);
     row.setAttributedTitle(Some(&row_title(device)));
+    row.setToolTip(Some(&NSString::from_str(&device.name)));
     if device.is_unrecognised() {
         let submenu = NSMenu::new(main_thread());
         submenu.addItem(&action_item("Report device…", sel!(reportDevice:), "", tag));
