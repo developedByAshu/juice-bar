@@ -54,7 +54,6 @@ const CONFIRM_HEIGHT: i32 = 184;
 const BUTTON_HEIGHT: i32 = 30;
 const RESET_NOTE_SECONDS: f64 = 4.0;
 const FIELD_TAG_BASE: isize = 100;
-const PLACEHOLDER: &str = "Rename";
 const ICON_MINUS: &str = "minus";
 const ICON_PLUS: &str = "plus";
 const DISABLED_FILL: f32 = 0.35;
@@ -548,8 +547,10 @@ impl SettingsWindow {
         for (index, device) in self.devices.clone().iter().enumerate() {
             let row_y = y + index as i32 * (ROW_HEIGHT + ROW_GAP);
             self.row_card(left, row_y, width, ROW_HEIGHT);
-            // The full name when it fits, and the menu's shortened name only when it does not.
-            let name = if canvas::text_width(&device.name, &self.fonts.body) <= room { device.name.clone() } else { short_name(&device.name) };
+            // The name in use: the user's rename first, else the device's own. The full name when it
+            // fits, and the menu's shortened name only when it does not.
+            let in_use = self.settings.renames.get(&device.id).cloned().unwrap_or_else(|| device.name.clone());
+            let name = if canvas::text_width(&in_use, &self.fonts.body) <= room { in_use } else { short_name(&in_use) };
             self.row_label(left, row_y, &name, &device_hint(device));
             canvas::round_rect(box_x, row_y + (ROW_HEIGHT - FIELD_HEIGHT) / 2, FIELD_WIDTH, FIELD_HEIGHT, CARD_RADIUS as f32, theme.segment_track_on_card);
             let is_shown = !self.settings.hidden.contains(&device.id);
@@ -763,7 +764,7 @@ fn sync_field_texts() {
 }
 
 /// Creates one borderless rename box, styled to sit on the drawn box behind it.
-fn make_field(index: usize, text: &str, font: &Font, theme: &Theme) -> Retained<NSTextField> {
+fn make_field(index: usize, text: &str, own_name: &str, font: &Font, theme: &Theme) -> Retained<NSTextField> {
     let field = NSTextField::textFieldWithString(&NSString::from_str(text), main_thread());
     field.setBordered(false);
     field.setBezeled(false);
@@ -772,7 +773,7 @@ fn make_field(index: usize, text: &str, font: &Font, theme: &Theme) -> Retained<
     field.setFont(Some(font.ns_font()));
     field.setTag(FIELD_TAG_BASE + index as isize);
     field.setHidden(true);
-    set_placeholder(&field, font, theme);
+    set_placeholder(&field, own_name, font, theme);
     if let Some(cell) = field.cell() {
         cell.setScrollable(true);
         cell.setWraps(false);
@@ -789,33 +790,35 @@ fn make_field(index: usize, text: &str, font: &Font, theme: &Theme) -> Retained<
     field
 }
 
-/// Greys the "Rename" hint in the theme's own muted colour, so it never reads as a typed name.
-fn set_placeholder(field: &NSTextField, font: &Font, theme: &Theme) {
+/// Shows the device's own name in grey in an empty box: the name used when there is no rename, so
+/// clearing the box visibly falls back to it. Greyed so it never reads as a typed rename.
+fn set_placeholder(field: &NSTextField, own_name: &str, font: &Font, theme: &Theme) {
     let color = mix(theme.muted, theme.segment_track_on_card, 0.35);
-    field.setPlaceholderAttributedString(Some(&canvas::attributed(PLACEHOLDER, font, color)));
+    field.setPlaceholderAttributedString(Some(&canvas::attributed(own_name, font, color)));
 }
 
-/// Recolours every rename box's hint after a theme change.
+/// Redraws every rename box's grey fallback name, after a theme change or a device's own name changing.
 fn refresh_placeholders() {
-    let Some((fields, theme)) = with_window(|state| (state.fields.clone(), state.theme)) else {
+    let Some((fields, names, theme)) = with_window(|state| (state.fields.clone(), state.devices.iter().map(|device| device.name.clone()).collect::<Vec<_>>(), state.theme)) else {
         return;
     };
     let font = Font::system(10.0, WEIGHT_REGULAR);
-    fields.iter().for_each(|field| set_placeholder(field, &font, &theme));
+    fields.iter().zip(&names).for_each(|(field, name)| set_placeholder(field, name, &font, &theme));
 }
 
 /// Replaces the rename boxes with one per current device.
 fn rebuild_fields() {
     end_editing();
-    let Some((view, old, texts, theme)) = with_window(|state| {
+    let Some((view, old, texts, names, theme)) = with_window(|state| {
         let texts: Vec<String> = state.devices.iter().map(|device| state.settings.renames.get(&device.id).cloned().unwrap_or_default()).collect();
-        (state.view.clone(), std::mem::take(&mut state.fields), texts, state.theme)
+        let names: Vec<String> = state.devices.iter().map(|device| device.name.clone()).collect();
+        (state.view.clone(), std::mem::take(&mut state.fields), texts, names, state.theme)
     }) else {
         return;
     };
     old.iter().for_each(|field| field.removeFromSuperview());
     let font = Font::system(10.0, WEIGHT_REGULAR);
-    let fields: Vec<_> = texts.iter().enumerate().map(|(index, text)| make_field(index, text, &font, &theme)).collect();
+    let fields: Vec<_> = texts.iter().zip(&names).enumerate().map(|(index, (text, name))| make_field(index, text, name, &font, &theme)).collect();
     fields.iter().for_each(|field| view.addSubview(field));
     with_window(|state| state.fields = fields);
 }
@@ -1061,6 +1064,7 @@ pub fn on_devices_changed(settings: &Settings, devices: &[Device]) {
         rebuild_fields();
         layout_fields();
     }
+    refresh_placeholders();
     sync_field_texts();
 }
 
