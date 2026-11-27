@@ -5,6 +5,7 @@ use crate::delegate::{delegate, main_thread};
 use crate::theme::tone_color;
 use juicebar_shared::device::{Connection, Device};
 use juicebar_shared::names::short_name;
+use objc2_app_kit::NSAttributedStringAttachmentConveniences;
 use juicebar_shared::tone::tone_for_percent;
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
@@ -17,7 +18,10 @@ use objc2_foundation::{NSArray, NSDictionary, NSMutableAttributedString, NSRange
 
 /// Where the connection label and the % end, in points from the row's text start.
 const CONNECTION_TAB: f64 = 190.0;
-const PERCENT_TAB: f64 = 255.0;
+const PERCENT_TAB: f64 = 240.0;
+/// Shown in place of the % when a known device is off or out of range; the words stay in the tooltip.
+const NOT_CONNECTED_SYMBOL: &str = "antenna.radiowaves.left.and.right.slash";
+const NOT_CONNECTED_TEXT: &str = "Not connected";
 
 /// Returns the connection label shown in each row.
 pub fn connection_label(connection: Connection) -> &'static str {
@@ -82,7 +86,21 @@ fn row_title(device: &Device) -> Retained<NSMutableAttributedString> {
     let digits = NSFont::monospacedDigitSystemFontOfSize_weight(font.pointSize(), unsafe { objc2_app_kit::NSFontWeightMedium });
     // SAFETY: as above.
     unsafe { text.addAttribute_value_range(NSFontAttributeName, digits.as_ref(), NSRange::new(percent_start, utf16_length(&percent))) };
+    if percent == NOT_CONNECTED_TEXT {
+        if let Some(symbol) = not_connected_symbol() {
+            text.replaceCharactersInRange_withAttributedString(NSRange::new(percent_start, utf16_length(&percent)), &symbol);
+        }
+    }
     text
+}
+
+/// Returns the small "no signal" symbol that replaces the words "Not connected" in a row.
+fn not_connected_symbol() -> Option<Retained<objc2_foundation::NSAttributedString>> {
+    let image = objc2_app_kit::NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(NOT_CONNECTED_SYMBOL), Some(&NSString::from_str(NOT_CONNECTED_TEXT)))?;
+    image.setTemplate(true);
+    let attachment = objc2_app_kit::NSTextAttachment::new();
+    attachment.setImage(Some(&image));
+    Some(objc2_foundation::NSAttributedString::attributedStringWithAttachment(&attachment))
 }
 
 fn action_item(title: &str, action: objc2::runtime::Sel, key: &str, tag: isize) -> Retained<NSMenuItem> {
@@ -101,7 +119,8 @@ pub fn build_device_row(device: &Device, index: usize) -> Vec<Retained<NSMenuIte
     let tag = index as isize;
     let row = action_item(&device.name, sel!(rowClicked:), "", tag);
     row.setAttributedTitle(Some(&row_title(device)));
-    row.setToolTip(Some(&NSString::from_str(&device.name)));
+    let tooltip = if percent_label(device) == NOT_CONNECTED_TEXT { format!("{}, {NOT_CONNECTED_TEXT}", device.name) } else { device.name.clone() };
+    row.setToolTip(Some(&NSString::from_str(&tooltip)));
     if device.is_unrecognised() {
         let submenu = NSMenu::new(main_thread());
         submenu.addItem(&action_item("Report device…", sel!(reportDevice:), "", tag));
@@ -131,9 +150,9 @@ pub fn show_menu(menu: &NSMenu, devices: &[Device]) {
         build_device_row(device, index).iter().for_each(|item| menu.addItem(item));
     }
     menu.addItem(&NSMenuItem::separatorItem(main_thread()));
-    menu.addItem(&action_item("Settings…", sel!(openSettings:), ",", -1));
+    menu.addItem(&action_item("Settings", sel!(openSettings:), ",", -1));
     // SAFETY: terminate: is answered by the application along the responder chain.
-    let quit = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(main_thread()), &NSString::from_str("Quit Juice Bar"), Some(sel!(terminate:)), &NSString::from_str("q")) };
+    let quit = unsafe { NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(main_thread()), &NSString::from_str("Quit"), Some(sel!(terminate:)), &NSString::from_str("q")) };
     menu.addItem(&quit);
 }
 
