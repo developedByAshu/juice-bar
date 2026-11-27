@@ -1,6 +1,7 @@
-//! The flyout that opens from the tray icon, drawn like NetSpeedGauge's popup menu: a summary line,
-//! a divider, one compact row per device, then Settings and Quit under a divider. Long names are cut
-//! and the full name, connection and state show in a tooltip.
+//! The two flyouts that open from the tray icon, drawn like NetSpeedGauge's popup: a left click (or
+//! hovering, when chosen) shows the devices flyout, a summary line and one compact row per device;
+//! a right click shows the menu, Settings and Quit only. Long names are cut and the full name,
+//! connection and state show in a tooltip.
 
 use crate::canvas::{create_font, mix, Align, Canvas};
 use crate::messages::WM_APP_MENU_ACTION;
@@ -38,7 +39,6 @@ const CLASS_NAME: &str = "JuiceBarFlyout";
 const MIN_WIDTH: i32 = 164;
 const SUMMARY_HEIGHT: i32 = 34;
 const ROW_HEIGHT: i32 = 32;
-const DIVIDER_HEIGHT: i32 = 9;
 const PADDING: i32 = 5;
 const SIDE: i32 = 14;
 const LABEL_LEFT: i32 = 40;
@@ -239,20 +239,18 @@ fn unit(value: i32, dpi: u32) -> i32 {
     (value as f32 * menu_scale(menu_points()) * dpi as f32 / 96.0).round() as i32
 }
 
-/// Returns the flyout's height in pixels at 100% scaling for a number of device rows and a text size.
+/// Returns the devices flyout's height in pixels at 100% scaling for a number of device rows and a text size.
 pub fn menu_height(device_rows: usize, points: u32) -> i32 {
-    let rows = device_rows.max(1) as i32;
-    let total = SUMMARY_HEIGHT + PADDING + rows * ROW_HEIGHT + DIVIDER_HEIGHT + 2 * ROW_HEIGHT + PADDING;
+    let total = SUMMARY_HEIGHT + PADDING + device_rows.max(1) as i32 * ROW_HEIGHT + PADDING;
     (total as f32 * menu_scale(points)).round() as i32
 }
 
-/// Returns the height at 100% scaling of the menu, or of the battery card, which has no Settings and Quit.
+/// Returns the height at 100% scaling of the devices flyout, or of the right-click menu's two rows.
 fn flyout_height(device_rows: usize, points: u32, is_card: bool) -> i32 {
-    if !is_card {
+    if is_card {
         return menu_height(device_rows, points);
     }
-    let total = SUMMARY_HEIGHT + PADDING + device_rows.max(1) as i32 * ROW_HEIGHT + PADDING;
-    (total as f32 * menu_scale(points)).round() as i32
+    ((PADDING * 2 + ROW_HEIGHT * 2) as f32 * menu_scale(points)).round() as i32
 }
 
 /// Returns the y that centres a line of text in a row.
@@ -269,30 +267,26 @@ fn percent_text(end: &RowEnd) -> Option<String> {
     }
 }
 
-/// Returns the width of the name column and of the whole flyout: as narrow as the rows allow.
-fn column_widths(canvas: &Canvas, fonts: &Fonts, rows: &[DeviceRow], dpi: u32) -> (i32, i32) {
-    let names = rows.iter().map(|row| canvas.text_width(&row.name, fonts.body)).max().unwrap_or_else(|| canvas.text_width(EMPTY_TEXT, fonts.body));
-    let labels = names.max(canvas.text_width("Settings", fonts.strong));
-    // The right column is as wide as its widest possible value, so a reading never pushes into the name.
-    let widest_percent = format!("{BOLT}100%");
-    let right_column = [
-        canvas.text_width(&widest_percent, fonts.strong),
-        canvas.text_width(ICON_NOT_CONNECTED, fonts.icon),
-        canvas.text_width(SHORTCUT_SETTINGS, fonts.small),
-        canvas.text_width(SHORTCUT_QUIT, fonts.small),
-    ]
-    .into_iter()
-    .max()
-    .unwrap_or(0);
+/// Returns the width of the label column and of the whole flyout: as narrow as its rows allow. The
+/// devices flyout sizes to its names and readings, the right-click menu to Settings and its shortcuts.
+fn column_widths(canvas: &Canvas, fonts: &Fonts, rows: &[DeviceRow], dpi: u32, is_card: bool) -> (i32, i32) {
+    let (names, right_column) = if is_card {
+        let names = rows.iter().map(|row| canvas.text_width(&row.name, fonts.body)).max().unwrap_or_else(|| canvas.text_width(EMPTY_TEXT, fonts.body));
+        // The right column is as wide as its widest possible value, so a reading never pushes into the name.
+        let widest_percent = format!("{BOLT}100%");
+        (names, canvas.text_width(&widest_percent, fonts.strong).max(canvas.text_width(ICON_NOT_CONNECTED, fonts.icon)))
+    } else {
+        let shortcuts = canvas.text_width(SHORTCUT_SETTINGS, fonts.small).max(canvas.text_width(SHORTCUT_QUIT, fonts.small));
+        (canvas.text_width("Settings", fonts.strong), shortcuts)
+    };
+    let labels = names;
     let width = unit(LABEL_LEFT, dpi) + labels + unit(PERCENT_GAP, dpi) + right_column + unit(SIDE, dpi);
     (names, width.max(unit(MIN_WIDTH, dpi)))
 }
 
-/// Returns the y position of a row: devices first, then Settings and Quit under a divider.
-fn row_top(row: usize, device_rows: usize, dpi: u32) -> i32 {
-    let device_rows = device_rows.max(1);
-    let divider = if row >= device_rows { DIVIDER_HEIGHT } else { 0 };
-    unit(SUMMARY_HEIGHT + PADDING + row as i32 * ROW_HEIGHT + divider, dpi)
+/// Returns the y position of a device row, under the summary line.
+fn row_top(row: usize, dpi: u32) -> i32 {
+    unit(SUMMARY_HEIGHT + PADDING + row as i32 * ROW_HEIGHT, dpi)
 }
 
 /// Returns each target and its rectangle, at the flyout's scaling.
@@ -300,18 +294,12 @@ fn layout(flyout: &Flyout, width: i32) -> Vec<(Target, RECT)> {
     let dpi = flyout.dpi;
     let count = flyout.rows.len();
     let (left, right) = (unit(PADDING, dpi), width - unit(PADDING, dpi));
-    let rect = |row: usize| {
-        let top = row_top(row, count, dpi);
-        RECT { left, top, right, bottom: top + unit(ROW_HEIGHT, dpi) }
-    };
-    let mut targets: Vec<(Target, RECT)> = (0..count).map(|index| (Target::Device(index), rect(index))).collect();
+    let rect = |top: i32| RECT { left, top, right, bottom: top + unit(ROW_HEIGHT, dpi) };
     if flyout.is_card {
-        return targets;
+        return (0..count).map(|index| (Target::Device(index), rect(row_top(index, dpi)))).collect();
     }
-    let first_footer = count.max(1);
-    targets.push((Target::Settings, rect(first_footer)));
-    targets.push((Target::Quit, rect(first_footer + 1)));
-    targets
+    // The right-click menu: Settings and Quit only.
+    vec![(Target::Settings, rect(unit(PADDING, dpi))), (Target::Quit, rect(unit(PADDING + ROW_HEIGHT, dpi)))]
 }
 
 /// Returns the flyout's client width, read from its window.
@@ -355,24 +343,27 @@ fn paint(flyout: &Flyout, canvas: &mut Canvas) {
     let fonts = &flyout.fonts;
     let width = canvas.width();
     canvas.clear(theme.surface, 1.0);
-    let divider_x = unit(PADDING, dpi);
-    let divider_width = width - divider_x * 2;
-    let divider_height = scale(1, dpi).max(1);
-
-    // The summary line, as NetSpeedGauge's "Today" line: the app on the left, the lowest % on the right.
-    let summary = RECT { left: 0, top: 0, right: width, bottom: unit(SUMMARY_HEIGHT, dpi) };
-    canvas.text(unit(SIDE, dpi), centred(canvas, &summary, fonts.small), "Juice Bar", fonts.small, theme.muted, Align::Left);
-    let lowest = flyout.rows.iter().filter_map(|row| match &row.end {
-        RowEnd::Percent { text, tone, .. } => text.trim_end_matches('%').parse::<u8>().ok().map(|percent| (percent, *tone)),
-        _ => None,
-    }).min_by_key(|(percent, _)| *percent);
-    if let Some((percent, tone)) = lowest {
-        canvas.text(width - unit(SIDE, dpi), centred(canvas, &summary, fonts.strong), &format!("Lowest {percent}%"), fonts.strong, tone_color(tone, &theme), Align::Right);
+    if flyout.is_card {
+        // The summary line, as NetSpeedGauge's "Today" line: the app on the left, the lowest % on the right.
+        let divider_x = unit(PADDING, dpi);
+        let summary = RECT { left: 0, top: 0, right: width, bottom: unit(SUMMARY_HEIGHT, dpi) };
+        canvas.text(unit(SIDE, dpi), centred(canvas, &summary, fonts.small), "Juice Bar", fonts.small, theme.muted, Align::Left);
+        let lowest = flyout.rows.iter().filter_map(|row| match &row.end {
+            RowEnd::Percent { text, tone, .. } => text.trim_end_matches('%').parse::<u8>().ok().map(|percent| (percent, *tone)),
+            _ => None,
+        }).min_by_key(|(percent, _)| *percent);
+        if let Some((percent, tone)) = lowest {
+            canvas.text(width - unit(SIDE, dpi), centred(canvas, &summary, fonts.strong), &format!("Lowest {percent}%"), fonts.strong, tone_color(tone, &theme), Align::Right);
+        }
+        canvas.round_rect(divider_x, unit(SUMMARY_HEIGHT, dpi), width - divider_x * 2, scale(1, dpi).max(1), 0.0, theme.border, 1.0);
+        if flyout.rows.is_empty() {
+            let top = row_top(0, dpi);
+            canvas.text(unit(SIDE, dpi), centred(canvas, &RECT { left: 0, top, right: width, bottom: top + unit(ROW_HEIGHT, dpi) }, fonts.body), EMPTY_TEXT, fonts.body, theme.muted, Align::Left);
+        }
     }
-    canvas.round_rect(divider_x, unit(SUMMARY_HEIGHT, dpi), divider_width, divider_height, 0.0, theme.border, 1.0);
 
     let targets = layout(flyout, width);
-    let (name_column, _) = column_widths(canvas, fonts, &flyout.rows, dpi);
+    let (name_column, _) = column_widths(canvas, fonts, &flyout.rows, dpi, flyout.is_card);
     let draw_wash = |canvas: &mut Canvas, rect: &RECT| {
         let hover = mix(theme.surface, theme.text, 0.09);
         canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, unit(HOVER_RADIUS, dpi) as f32, hover, 1.0);
@@ -415,21 +406,12 @@ fn paint(flyout: &Flyout, canvas: &mut Canvas) {
                 canvas.text(unit(SIDE, dpi), centred(canvas, rect, fonts.icon), icon, fonts.icon, icon_color, Align::Left);
                 let font = if is_lit { fonts.strong } else { fonts.body };
                 canvas.text(label_x, centred(canvas, rect, font), label, font, theme.text, Align::Left);
-                // The shortcut ends on the same right edge as every % and icon above it.
+                // The shortcut ends on the same right edge as every % and icon in the devices flyout.
                 let shortcut = if *target == Target::Settings { SHORTCUT_SETTINGS } else { SHORTCUT_QUIT };
                 canvas.text(width - unit(SIDE, dpi), centred(canvas, rect, fonts.small), shortcut, fonts.small, theme.muted, Align::Right);
             }
         }
     }
-    if flyout.rows.is_empty() {
-        let top = row_top(0, 0, dpi);
-        canvas.text(unit(SIDE, dpi), centred(canvas, &RECT { left: 0, top, right: width, bottom: top + unit(ROW_HEIGHT, dpi) }, fonts.body), EMPTY_TEXT, fonts.body, theme.muted, Align::Left);
-    }
-    if flyout.is_card {
-        return;
-    }
-    let settings_top = row_top(flyout.rows.len().max(1), flyout.rows.len(), dpi);
-    canvas.round_rect(divider_x, settings_top - unit(DIVIDER_HEIGHT / 2 + 1, dpi), divider_width, divider_height, 0.0, theme.border, 1.0);
 }
 
 impl Theme {
@@ -463,7 +445,7 @@ fn create_row_tooltips(window: HWND, rows: &[DeviceRow], dpi: u32) -> HWND {
         SendMessageW(tooltip, TTM_SETMAXTIPWIDTH, 0, scale(TOOLTIP_WIDTH, dpi) as isize);
         let width = client_width(window);
         for (index, row) in rows.iter().enumerate() {
-            let top = row_top(index, rows.len(), dpi);
+            let top = row_top(index, dpi);
             let mut text: Vec<u16> = vec![0; row.tooltip.encode_utf16().count() + 1];
             copy_into(&mut text, &row.tooltip);
             let mut info: TTTOOLINFOW = std::mem::zeroed();
@@ -733,7 +715,7 @@ fn flyout_bounds(anchor: RECT, rows: &[DeviceRow], is_card: bool) -> (i32, i32, 
         let (mut dpi_x, mut dpi_y) = (96u32, 96u32);
         GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
         let dpi = dpi_x.max(96);
-        let (_, width) = column_widths(&Canvas::new(1, 1), &Fonts::new(dpi), rows, dpi);
+        let (_, width) = column_widths(&Canvas::new(1, 1), &Fonts::new(dpi), rows, dpi, is_card);
         let height = scale(flyout_height(rows.len(), menu_points(), is_card), dpi);
         let (x, y) = place_flyout(anchor, info.rcMonitor, info.rcWork, width, height, scale(SCREEN_MARGIN, dpi));
         (x, y, width, height, dpi)
@@ -749,12 +731,13 @@ fn anchor_rect() -> RECT {
     })
 }
 
-/// Opens the flyout next to the tray icon with these devices. A second call while open closes it.
-pub fn show_menu(devices: &[Device]) {
-    open_flyout(devices, false, false);
+/// Opens the right-click menu next to the tray icon: Settings and Quit only. A second call closes it.
+pub fn show_menu() {
+    open_flyout(&[], false, false);
 }
 
-/// Opens the battery card: the device rows only. A hover card never takes focus and gives way to an open menu.
+/// Opens the devices flyout: the summary and one row per device. Opened by hovering, it never takes
+/// focus and gives way to an open menu.
 pub fn show_card(devices: &[Device], is_hover: bool) {
     if is_hover && is_menu_open() {
         return;
@@ -823,8 +806,11 @@ fn open_flyout(devices: &[Device], is_card: bool, is_hover: bool) {
     }
 }
 
-/// Shows new readings in the open flyout, resizing it when the number of rows changed.
+/// Shows new readings in the open devices flyout, resizing it when the rows changed. The right-click menu has no rows to refresh.
 pub fn refresh_menu(devices: &[Device]) {
+    if with_flyout(|flyout| flyout.is_card) != Some(true) {
+        return;
+    }
     let rows: Vec<DeviceRow> = devices.iter().map(build_device_row).collect();
     let open = with_flyout(|flyout| {
         flyout.hovered = None;

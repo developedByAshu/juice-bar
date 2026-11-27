@@ -552,7 +552,7 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                         let (label, hint, chosen) = if setting == Setting::Hover {
                             ("On hover", "When the pointer rests on the icon", settings.hover_action.number())
                         } else {
-                            ("On click", "Right-click opens the menu", settings.click_action.number())
+                            ("On click", "Right-click opens Settings and Quit", u8::from(settings.click_action == ClickAction::Settings))
                         };
                         row_label(canvas, state, text_x, top, label, hint, label_room);
                         draw_segments(canvas, state, controls, setting, chosen);
@@ -743,7 +743,7 @@ fn activate(control: Control) {
                     if setting == Setting::Hover {
                         settings.hover_action = HoverAction::from_number(option);
                     } else {
-                        settings.click_action = ClickAction::from_number(option);
+                        settings.click_action = if option == 1 { ClickAction::Settings } else { ClickAction::Devices };
                     }
                 }
                 save_and_announce(state);
@@ -799,7 +799,7 @@ fn activate(control: Control) {
 
 /// The options of a segmented choice, as NetSpeedGauge's "On hover" and "On click" rows offer them.
 fn segment_options(setting: Setting) -> &'static [&'static str] {
-    if setting == Setting::Hover { &["Nothing", "Battery card"] } else { &["Menu", "Battery card", "Settings"] }
+    if setting == Setting::Hover { &["Nothing", "Battery card"] } else { &["Devices", "Settings"] }
 }
 
 /// Returns each option's rectangle of a segmented choice ending at the right edge, NetSpeedGauge's sizes.

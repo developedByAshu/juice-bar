@@ -347,7 +347,7 @@ impl App {
             }
         }
         if OPEN_MENU_AFTER_SCAN.swap(false, std::sync::atomic::Ordering::Relaxed) {
-            self.toggle_menu();
+            self.on_icon_click();
         }
         if std::mem::take(&mut self.is_scan_wanted) {
             self.refresh();
@@ -479,8 +479,7 @@ impl App {
     pub fn on_icon_click(&self) {
         let action = self.settings.borrow().click_action;
         match action {
-            ClickAction::Menu => self.toggle_menu(),
-            ClickAction::Card => {
+            ClickAction::Devices => {
                 set_menu_text_points(self.settings.borrow().menu_font_points);
                 show_card(&self.visible_devices(), false);
             }
@@ -504,11 +503,10 @@ impl App {
         }
     }
 
-    /// Opens or closes the flyout from the tray icon.
+    /// Opens or closes the right-click menu: Settings and Quit.
     pub fn toggle_menu(&self) {
-        let devices = self.visible_devices();
         set_menu_text_points(self.settings.borrow().menu_font_points);
-        show_menu(&devices);
+        show_menu();
     }
 
     /// Closes every window, for quit.
