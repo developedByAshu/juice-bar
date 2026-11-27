@@ -32,6 +32,10 @@ struct App {
     shown: Vec<Device>,
     poll_timer: Option<Retained<NSTimer>>,
     is_scanning: bool,
+    /// When each device (by row id) last gave a battery reading, so one missed read keeps its %.
+    last_read: std::collections::HashMap<String, std::time::Instant>,
+    /// Keyboards whose dongle said they fell asleep; these show as asleep at once, without the grace.
+    asleep: Vec<(u16, u16)>,
 }
 
 thread_local! {
@@ -61,7 +65,7 @@ pub fn finish_startup() {
     let settings = Settings::load();
     let poll_timer = Some(start_timer(f64::from(settings.poll_minutes) * 60.0, sel!(poll:), true));
     APP.with(|cell| {
-        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false });
+        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false, last_read: std::collections::HashMap::new(), asleep: Vec::new() });
     });
     watch_system_events();
     refresh();
@@ -236,6 +240,7 @@ fn start_hid_thread() -> Sender<HidJob> {
                         watches = api.as_ref().map_or_else(Vec::new, open_keyboard_watches);
                         dispatch2::DispatchQueue::main().exec_async(move || {
                             with_app(|app| {
+                                let scanned = keep_recent_readings(app, scanned);
                                 app.scanned = scanned;
                                 app.bluetooth = bluetooth;
                                 app.is_scanning = false;
@@ -264,6 +269,30 @@ fn start_hid_thread() -> Sender<HidJob> {
         }
     });
     sender
+}
+
+/// How long a device keeps its last % through missed reads. A read can miss now and then (the
+/// mouse pushes its report every few seconds, a busy keyboard can answer late), and one miss must not
+/// blank a % that was fine a minute ago.
+const KEEP_READING_FOR: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Fills a missed reading with the device's last %, unless its dongle said it is asleep or the last
+/// reading is older than `KEEP_READING_FOR`. Records when each device last answered.
+fn keep_recent_readings(app: &mut App, mut scanned: Vec<ScannedDevice>) -> Vec<ScannedDevice> {
+    let now = std::time::Instant::now();
+    for new in &mut scanned {
+        let id = new.device.id.clone();
+        if new.device.battery.is_some() {
+            app.last_read.insert(id, now);
+            continue;
+        }
+        let is_asleep = app.asleep.contains(&(new.device.vendor_id, new.device.product_id));
+        let is_recent = app.last_read.get(&id).is_some_and(|read| now.duration_since(*read) < KEEP_READING_FOR);
+        if !is_asleep && is_recent {
+            new.device.battery = app.scanned.iter().find(|old| old.device.id == id).and_then(|old| old.device.battery);
+        }
+    }
+    scanned
 }
 
 /// A keyboard dongle's command channel, held open to hear what it pushes.
@@ -309,6 +338,12 @@ fn wait_for_keyboard_events(watches: &mut Vec<KeyboardWatch>) {
 /// Acts on a keyboard event at once: a wake reads the battery now, sleep marks it, a push shows it.
 fn on_keyboard_event(vendor_id: u16, product_id: u16, event: juicebar_shared::protocols::bytech::KeyboardEvent) {
     use juicebar_shared::protocols::bytech::KeyboardEvent;
+    with_app(|app| {
+        app.asleep.retain(|ids| *ids != (vendor_id, product_id));
+        if event == KeyboardEvent::Asleep {
+            app.asleep.push((vendor_id, product_id));
+        }
+    });
     if event == KeyboardEvent::Awake {
         refresh();
         return;
