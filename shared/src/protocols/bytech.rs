@@ -49,6 +49,37 @@ pub fn parse_power_answer(report: &[u8]) -> Option<Battery> {
     (percent <= 100).then_some(Battery { percent, is_charging: (packet[5] >> 4) & 1 == 1 })
 }
 
+/// Command byte of a packet the dongle pushes on its own (no request), on the same channel.
+const EVENT: u8 = 0x0A;
+/// Event kind: the keyboard's link to the dongle changed; the next byte is 1 for awake, 0 for asleep.
+const EVENT_LINK: u8 = 0x02;
+/// Event kind: the dongle reports the battery; the next byte is the %.
+const EVENT_BATTERY: u8 = 0x05;
+
+/// What the dongle tells us without being asked. Recorded on the Swarm 75 dongle on 28 Nov 2026:
+/// `0a 01 00 04 02 00` when the keyboard fell asleep, `02 01` on the first key press after, `05 47 01`
+/// as a battery push (71%). This is the callback the app waits on, instead of polling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyboardEvent {
+    Awake,
+    Asleep,
+    Battery(Battery),
+}
+
+/// Reads a pushed event packet. `report` starts with the report id. None for anything else or a bad checksum.
+pub fn parse_event(report: &[u8]) -> Option<KeyboardEvent> {
+    let (&report_id, packet) = report.split_first()?;
+    if report_id != REPORT_ID || packet.len() < PACKET_LENGTH || packet[0] != EVENT || packet[PACKET_LENGTH - 1] != checksum(REPORT_ID, packet) {
+        return None;
+    }
+    match packet[4] {
+        EVENT_LINK if packet[5] == 1 => Some(KeyboardEvent::Awake),
+        EVENT_LINK => Some(KeyboardEvent::Asleep),
+        EVENT_BATTERY if (1..=100).contains(&packet[5]) => Some(KeyboardEvent::Battery(Battery { percent: packet[5], is_charging: false })),
+        _ => None,
+    }
+}
+
 impl BatteryProtocol for Bytech {
     fn id(&self) -> &'static str {
         "bytech"
