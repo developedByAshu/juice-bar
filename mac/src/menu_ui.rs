@@ -21,6 +21,8 @@ use std::cell::{Cell, RefCell};
 
 // NetSpeedGauge's menu numbers, the geometry at full size. The menu draws them at MENU_SCALE when the
 // text is the default size, and in proportion to the text size otherwise.
+/// The note shown when no wireless mouse or keyboard is found.
+const EMPTY_TEXT: &str = "No devices found";
 const MENU_WIDTH: f64 = 164.0;
 const SUMMARY_HEIGHT: f64 = 34.0;
 const ROW_HEIGHT: f64 = 32.0;
@@ -367,7 +369,7 @@ impl MenuRowView {
                 canvas::round_rect(padding, metrics.summary_height, divider_width, 1, 0.0, theme.border);
             }
             MenuRow::Divider => canvas::round_rect(padding, metrics.divider_height / 2, divider_width, 1, 0.0, theme.border),
-            MenuRow::Empty => canvas::text(metrics.label_x, metrics.label_top, "No devices found", &metrics.body, theme.muted, Align::Left),
+            MenuRow::Empty => canvas::text(metrics.label_x, metrics.label_top, EMPTY_TEXT, &metrics.body, theme.muted, Align::Left),
             MenuRow::Settings => {
                 label("gearshape", "Settings");
                 canvas::text_ink_right(right, metrics.label_top, "⌘,", &metrics.body, theme.muted);
@@ -445,7 +447,9 @@ fn targeted_item(action: Sel, key: &str, tag: isize) -> Retained<NSMenuItem> {
 /// right column and the right inset. Never narrower than NetSpeedGauge's menu at the same scale.
 fn menu_width(devices: &[Device], metrics: &Metrics) -> i32 {
     let longest = devices.iter().map(|device| canvas::text_width(&short_name(&device.name), &metrics.strong)).max().unwrap_or(0);
-    (metrics.label_x + longest + metrics.name_gap + right_column_width(metrics) + metrics.right_inset).max(metrics.min_width)
+    // With no devices the only text is the empty note, which must fit whole instead of being cut.
+    let empty_note = if devices.is_empty() { metrics.label_x + canvas::text_width(EMPTY_TEXT, &metrics.body) + metrics.right_inset } else { 0 };
+    (metrics.label_x + longest + metrics.name_gap + right_column_width(metrics) + metrics.right_inset).max(metrics.min_width).max(empty_note)
 }
 
 /// Returns (menu width, the gap between the longest name and the right column, the scaled least gap), for checks.

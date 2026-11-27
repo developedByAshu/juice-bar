@@ -92,6 +92,23 @@ fn main() {
         }
     }
     println!("saved to {output}");
+
+    // With no devices the note must show whole: its ink ends before the menu's right padding.
+    for points in [MENU_FONT_POINTS_MIN, MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX] {
+        let path = format!("{output}/menu_empty_{points}pt.png");
+        assert!(capture_menu_for_checks(&[], points, &path, true, None));
+        let data = NSData::dataWithContentsOfFile(&NSString::from_str(&path)).expect("png");
+        let image = NSBitmapImageRep::imageRepWithData(&data).expect("bitmap");
+        let (wide, high) = (image.pixelsWide(), image.pixelsHigh());
+        let background = image.colorAtX_y(1, 1).expect("pixel");
+        let is_ink = |x: isize, y: isize| {
+            let pixel = image.colorAtX_y(x, y).expect("pixel");
+            (pixel.redComponent() - background.redComponent()).abs() + (pixel.greenComponent() - background.greenComponent()).abs() + (pixel.blueComponent() - background.blueComponent()).abs() > 0.25
+        };
+        let right_ink = (0..wide).rev().find(|&x| (0..high).any(|y| is_ink(x, y))).unwrap_or(0);
+        println!("{points} pt empty menu: {wide} px wide, ink ends at px {right_ink}");
+        assert!(right_ink < wide - 4, "the empty note runs into the right edge");
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
