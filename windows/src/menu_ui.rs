@@ -41,7 +41,8 @@ const DIVIDER_HEIGHT: i32 = 9;
 const PADDING: i32 = 5;
 const SIDE: i32 = 14;
 const LABEL_LEFT: i32 = 40;
-const PERCENT_GAP: i32 = 16;
+// The least space between a name and the right column, so the two never touch.
+const PERCENT_GAP: i32 = 24;
 const DOT_RADIUS: i32 = 4;
 const HOVER_RADIUS: i32 = 5;
 const SCREEN_MARGIN: i32 = 12;
@@ -226,14 +227,20 @@ fn percent_text(end: &RowEnd) -> Option<String> {
 /// Returns the width of the name column and of the whole flyout: as narrow as the rows allow.
 fn column_widths(canvas: &Canvas, fonts: &Fonts, rows: &[DeviceRow], dpi: u32) -> (i32, i32) {
     let names = rows.iter().map(|row| canvas.text_width(&row.name, fonts.body)).max().unwrap_or_else(|| canvas.text_width(EMPTY_TEXT, fonts.body));
-    let percents = rows
-        .iter()
-        .map(|row| percent_text(&row.end).map_or_else(|| if row.end == RowEnd::NotConnected { canvas.text_width(ICON_NOT_CONNECTED, fonts.icon) } else { 0 }, |text| canvas.text_width(&text, fonts.strong)))
-        .max()
-        .unwrap_or(0);
-    let width = scale(LABEL_LEFT, dpi) + names + scale(PERCENT_GAP, dpi) + percents + scale(SIDE, dpi);
-    let footer = scale(LABEL_LEFT, dpi) + canvas.text_width("Settings", fonts.strong) + scale(PERCENT_GAP, dpi) + canvas.text_width(SHORTCUT_SETTINGS, fonts.small) + scale(SIDE, dpi);
-    (names, width.max(footer).max(scale(MIN_WIDTH, dpi)))
+    let labels = names.max(canvas.text_width("Settings", fonts.strong));
+    // The right column is as wide as its widest possible value, so a reading never pushes into the name.
+    let widest_percent = format!("{BOLT}100%");
+    let right_column = [
+        canvas.text_width(&widest_percent, fonts.strong),
+        canvas.text_width(ICON_NOT_CONNECTED, fonts.icon),
+        canvas.text_width(SHORTCUT_SETTINGS, fonts.small),
+        canvas.text_width(SHORTCUT_QUIT, fonts.small),
+    ]
+    .into_iter()
+    .max()
+    .unwrap_or(0);
+    let width = scale(LABEL_LEFT, dpi) + labels + scale(PERCENT_GAP, dpi) + right_column + scale(SIDE, dpi);
+    (names, width.max(scale(MIN_WIDTH, dpi)))
 }
 
 /// Returns the y position of a row: devices first, then Settings and Quit under a divider.
