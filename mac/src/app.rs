@@ -176,7 +176,7 @@ fn rebuild(app: &mut App) {
     // Settings lists every device; the icon and menu leave out the hidden ones.
     let shown: Vec<Device> = app.devices.iter().filter(|device| !app.settings.hidden.contains(&device.id)).cloned().collect();
     status_icon::update_status_icon(&app.status_item, icon_tone(&shown), lowest_percent(&shown), app.settings.shows_percent_in_icon);
-    menu_ui::show_menu(&app.menu, &shown);
+    menu_ui::show_menu(&app.menu, &shown, app.settings.menu_font_points);
     app.shown = shown;
     crate::settings_ui::on_devices_changed(&app.settings, &app.found);
 }
@@ -299,6 +299,13 @@ pub fn report_url_for(tag: isize) -> Option<String> {
         Some(report_url(device, &interfaces, &os, juicebar_shared::APP_VERSION))
     })
     .flatten()
+}
+
+/// Returns the menu bar item's frame and the usable area of its screen, which the menu is placed against.
+pub fn item_and_screen_frames() -> Option<(objc2_foundation::NSRect, objc2_foundation::NSRect)> {
+    let window = with_app(|app| app.status_item.button(main_thread()).and_then(|button| button.window())).flatten()?;
+    let area = window.screen()?.visibleFrame();
+    Some((window.frame(), area))
 }
 
 /// Returns a copy of the settings and every device under its own name, for the settings window.
