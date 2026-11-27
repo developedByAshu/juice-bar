@@ -10,11 +10,10 @@ use crate::menu_ui::{connection_label, fit_text};
 use crate::messages::WM_APP_SETTINGS_CHANGED;
 use crate::startup;
 use crate::tray_pin;
-use crate::theme::{apply_window_look, current_theme, draw_made_with_love, on_theme_change, tone_color, Backdrop, Theme, GREEN, ICON_FONT, UI_FONT, UI_FONT_STRONG};
+use crate::theme::{apply_window_look, current_theme, draw_made_with_love, on_theme_change, Backdrop, Theme, GREEN, ICON_FONT, UI_FONT, UI_FONT_STRONG};
 use crate::util::{scale, to_wide};
 use juicebar_shared::device::{Device, NameSource};
 use juicebar_shared::settings::{ClickAction, HoverAction, Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
-use juicebar_shared::tone::tone_for_percent;
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -67,8 +66,6 @@ const ICON_SAVE: &str = "\u{E73E}";
 const ICON_CANCEL: &str = "\u{E711}";
 const DISABLED_FILL: f32 = 0.35;
 const DISABLED_TEXT: f32 = 0.5;
-// Devices rows start their name after the battery dot.
-const DEVICE_TEXT_LEFT: i32 = 30;
 const EDIT_SUBCLASS: usize = 1;
 const ICON_GENERAL: &str = "\u{E713}";
 const ICON_DEVICES: &str = "\u{E772}";
@@ -641,13 +638,8 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                 if needs_name_confirm(device, &settings) {
                     hint.push_str("  \u{00B7}  name from Bluetooth");
                 }
-                let dot_x = text_x + scale(4, dpi);
-                let middle = top + row_height / 2;
-                match device.battery {
-                    Some(battery) => canvas.circle(dot_x, middle, scale(4, dpi), tone_color(tone_for_percent(battery.percent), &theme)),
-                    None => canvas.round_outline(dot_x - scale(4, dpi), middle - scale(4, dpi), scale(8, dpi), scale(8, dpi), scale(4, dpi) as f32, 1.5, theme.muted, 1.0),
-                }
-                let name_x = left + scale(DEVICE_TEXT_LEFT, dpi);
+                // No battery dot: the name starts where every row's label does, as on the Mac.
+                let name_x = text_x;
                 let first_control = rect_of(Control::ConfirmName(index)).or(rect_of(Control::Rename(index))).map_or(right, |rect| rect.left);
                 if is_renaming(state, Some(device)) {
                     // As on the Mac: the name swaps for a filled field holding it, with ✓ to save and ✕ to cancel.
@@ -938,7 +930,7 @@ fn rename_field(state: &Window, top: i32, right: i32) -> RECT {
     let (left, _) = content_columns(dpi);
     let (save, _) = edit_buttons(toggle_rect(right, top, dpi).left, top, dpi);
     let field_top = top + (scale(ROW_HEIGHT, dpi) - scale(FIELD_HEIGHT, dpi)) / 2;
-    RECT { left: left + scale(DEVICE_TEXT_LEFT - 8, dpi), top: field_top, right: save.left - scale(8, dpi), bottom: field_top + scale(FIELD_HEIGHT, dpi) }
+    RECT { left: left + scale(8, dpi), top: field_top, right: save.left - scale(8, dpi), bottom: field_top + scale(FIELD_HEIGHT, dpi) }
 }
 
 /// Opens a field over a device's name holding the name in use, all selected. Return or ✓ saves;
