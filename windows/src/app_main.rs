@@ -157,12 +157,14 @@ pub fn run() {
             crate::app::OPEN_MENU_AFTER_SCAN.store(true, Ordering::Relaxed);
         }
         App::start(window);
-        // --open-settings[=general|devices|about|reset] opens a page at start, for screenshots.
+        // --open-settings[=general|appearance|devices|advanced|about|reset] opens a page at start, for screenshots.
         if let Some(argument) = std::env::args().find(|argument| argument.starts_with("--open-settings")) {
             use crate::settings_ui::{open_settings_on, show_reset_confirm, Page};
             let choice = argument.split_once('=').map_or("general", |(_, value)| value);
             let page = match choice {
+                "appearance" => Page::Appearance,
                 "devices" => Page::Devices,
+                "advanced" | "reset" => Page::Advanced,
                 "about" => Page::About,
                 _ => Page::General,
             };

@@ -62,6 +62,8 @@ const DEVICE_TEXT_LEFT: i32 = 30;
 const EDIT_SUBCLASS: usize = 1;
 const ICON_GENERAL: &str = "\u{E713}";
 const ICON_DEVICES: &str = "\u{E772}";
+const ICON_APPEARANCE: &str = "\u{E790}";
+const ICON_ADVANCED: &str = "\u{E9E9}";
 const ICON_ABOUT: &str = "\u{E946}";
 const ICON_MINUS: &str = "\u{E738}";
 const ICON_PLUS: &str = "\u{E710}";
@@ -88,11 +90,20 @@ const PRIVACY_LINES: [&str; 4] = [
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Page {
     General,
+    Appearance,
     Devices,
+    Advanced,
     About,
 }
 
-const PAGES: [(Page, &str, &str); 3] = [(Page::General, ICON_GENERAL, "General"), (Page::Devices, ICON_DEVICES, "Devices"), (Page::About, ICON_ABOUT, "About")];
+// The same pages, icons and order as NetSpeedGauge's sidebar, with Devices for Juice Bar's own rows.
+const PAGES: [(Page, &str, &str); 5] = [
+    (Page::General, ICON_GENERAL, "General"),
+    (Page::Appearance, ICON_APPEARANCE, "Appearance"),
+    (Page::Devices, ICON_DEVICES, "Devices"),
+    (Page::Advanced, ICON_ADVANCED, "Advanced"),
+    (Page::About, ICON_ABOUT, "About"),
+];
 
 /// Something on a page that reacts to the pointer or keyboard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -222,18 +233,18 @@ fn device_list(state: &Window) -> Vec<Device> {
 /// Returns the pieces of the current page, top to bottom.
 fn page_blocks(state: &Window) -> Vec<Block> {
     match state.page {
-        Page::General => vec![
-            Block::Section("Battery checks"),
-            Block::Setting(Setting::Poll),
+        Page::General => vec![Block::Section("Startup"), Block::Setting(Setting::Startup), Block::Section("Battery checks"), Block::Setting(Setting::Poll)],
+        Page::Appearance => vec![
             Block::Section("Tray icon"),
             Block::Setting(Setting::Percent),
             Block::Setting(Setting::TaskbarPin),
+            Block::Section("Menu"),
             Block::Setting(Setting::MenuText),
+        ],
+        Page::Advanced => vec![
             Block::Section("Behaviour"),
             Block::Setting(Setting::Hover),
             Block::Setting(Setting::Click),
-            Block::Section("Startup"),
-            Block::Setting(Setting::Startup),
             Block::Section("Reset"),
             Block::Setting(Setting::Reset),
         ],
