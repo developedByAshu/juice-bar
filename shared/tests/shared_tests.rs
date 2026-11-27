@@ -4,7 +4,7 @@ use juicebar_shared::protocols::bytech::{build_request, parse_power_answer, Byte
 use juicebar_shared::protocols::yuandaxin::{self, Yuandaxin};
 use juicebar_shared::protocols::{BatteryProtocol, Reading};
 use juicebar_shared::report::report_url;
-use juicebar_shared::settings::{Settings, MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
+use juicebar_shared::settings::{ClickAction, HoverAction, Settings, MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
 use juicebar_shared::tone::{icon_tone, tone_for_percent, Tone};
 use juicebar_shared::transport::ReplayTransport;
 
@@ -151,4 +151,14 @@ fn report_url_carries_ids_and_no_personal_data() {
     let url = report_url(&device_at(50, Connection::Dongle, false), &[], "macOS 26", "0.1.0");
     assert!(url.starts_with("https://github.com/developedByAshu/juice-bar/issues/new?title=Device%20report%3A%203554%3Afa09"));
     assert!(url.contains("Vendor%20id%3A%200x3554"));
+}
+
+#[test]
+fn hover_and_click_choices_survive_a_save_and_default_to_todays_behaviour() {
+    let fresh = Settings::from_text("");
+    assert_eq!((fresh.hover_action, fresh.click_action), (HoverAction::Nothing, ClickAction::Menu));
+    let chosen = Settings { hover_action: HoverAction::Card, click_action: ClickAction::Settings, ..Settings::default() };
+    let loaded = Settings::from_text(&chosen.to_text());
+    assert_eq!((loaded.hover_action, loaded.click_action), (HoverAction::Card, ClickAction::Settings));
+    assert_eq!(Settings::from_text("click_action=9").click_action, ClickAction::Menu, "an unknown number falls back");
 }

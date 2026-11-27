@@ -11,6 +11,49 @@ pub const MENU_FONT_POINTS_DEFAULT: u32 = 9;
 pub const MENU_FONT_POINTS_MIN: u32 = 7;
 pub const MENU_FONT_POINTS_MAX: u32 = 12;
 
+/// What resting the pointer on the icon does, as NetSpeedGauge's "On hover".
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum HoverAction {
+    /// Only the plain tooltip.
+    #[default]
+    Nothing,
+    /// A small card with each device's %.
+    Card,
+}
+
+/// What a left click on the icon does, as NetSpeedGauge's "On click". A right click always opens the menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ClickAction {
+    #[default]
+    Menu,
+    Card,
+    Settings,
+}
+
+impl HoverAction {
+    pub fn from_number(number: u8) -> Self {
+        if number == 1 { Self::Card } else { Self::Nothing }
+    }
+
+    pub fn number(self) -> u8 {
+        self as u8
+    }
+}
+
+impl ClickAction {
+    pub fn from_number(number: u8) -> Self {
+        match number {
+            1 => Self::Card,
+            2 => Self::Settings,
+            _ => Self::Menu,
+        }
+    }
+
+    pub fn number(self) -> u8 {
+        self as u8
+    }
+}
+
 /// What the user chose.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Settings {
@@ -19,6 +62,8 @@ pub struct Settings {
     pub shows_percent_in_icon: bool,
     /// The menu's text size, 7 to 12 points. Its rows, icons, gaps and width scale with it.
     pub menu_font_points: u32,
+    pub hover_action: HoverAction,
+    pub click_action: ClickAction,
     /// Device id to the name the user typed.
     pub renames: BTreeMap<String, String>,
     /// Device ids left out of the menu.
@@ -35,6 +80,8 @@ impl Default for Settings {
             poll_minutes: 5,
             shows_percent_in_icon: false,
             menu_font_points: MENU_FONT_POINTS_DEFAULT,
+            hover_action: HoverAction::Nothing,
+            click_action: ClickAction::Menu,
             renames: BTreeMap::new(),
             hidden: Vec::new(),
             confirmed_bluetooth_names: BTreeMap::new(),
@@ -59,6 +106,8 @@ impl Settings {
             format!("poll_minutes={}", self.poll_minutes),
             format!("shows_percent_in_icon={}", u8::from(self.shows_percent_in_icon)),
             format!("menu_font_points={}", self.menu_font_points),
+            format!("hover_action={}", self.hover_action.number()),
+            format!("click_action={}", self.click_action.number()),
         ];
         lines.extend(self.renames.iter().map(|(id, name)| format!("rename.{id}={name}")));
         lines.extend(self.hidden.iter().map(|id| format!("hidden.{id}=1")));
@@ -77,6 +126,8 @@ impl Settings {
                 "menu_font_points" => {
                     settings.menu_font_points = value.parse().unwrap_or(MENU_FONT_POINTS_DEFAULT).clamp(MENU_FONT_POINTS_MIN, MENU_FONT_POINTS_MAX);
                 }
+                "hover_action" => settings.hover_action = HoverAction::from_number(value.parse().unwrap_or(0)),
+                "click_action" => settings.click_action = ClickAction::from_number(value.parse().unwrap_or(0)),
                 _ => {
                     if let Some(id) = key.strip_prefix("rename.") {
                         settings.renames.insert(id.to_string(), value.to_string());
