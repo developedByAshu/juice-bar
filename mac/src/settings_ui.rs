@@ -13,7 +13,7 @@ use crate::theme::{apply_title_bar, current_theme, dark_theme, draw_made_with_lo
 use crate::{app, startup};
 use juicebar_shared::device::{Connection, Device, DeviceKind};
 use juicebar_shared::names::short_name;
-use juicebar_shared::settings::Settings;
+use juicebar_shared::settings::{Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
@@ -55,6 +55,10 @@ const BUTTON_HEIGHT: i32 = 30;
 const RESET_NOTE_SECONDS: f64 = 4.0;
 const FIELD_TAG_BASE: isize = 100;
 const PLACEHOLDER: &str = "Rename";
+const ICON_MINUS: &str = "minus";
+const ICON_PLUS: &str = "plus";
+const DISABLED_FILL: f32 = 0.35;
+const DISABLED_TEXT: f32 = 0.5;
 const ICON_CHECK: &str = "checkmark";
 const ICON_DONE: &str = "checkmark.circle.fill";
 const ICON_LOCK: &str = "lock.fill";
@@ -90,6 +94,7 @@ enum Row {
     Note(&'static str),
     LaunchAtLogin,
     ShowPercent,
+    MenuTextSize,
     PollInterval,
     DeviceList,
     ResetAll,
@@ -98,7 +103,7 @@ enum Row {
     Developer,
 }
 
-const GENERAL_ROWS: &[Row] = &[Row::Section("Startup"), Row::LaunchAtLogin, Row::Section("Menu bar"), Row::ShowPercent, Row::Section("Checks"), Row::PollInterval];
+const GENERAL_ROWS: &[Row] = &[Row::Section("Startup"), Row::LaunchAtLogin, Row::Section("Menu bar"), Row::ShowPercent, Row::MenuTextSize, Row::Section("Checks"), Row::PollInterval];
 const DEVICES_ROWS: &[Row] = &[
     Row::Section("Your devices"),
     Row::Note("Type a name to change how a device shows in the menu.\nSwitch a device off to leave it out of the menu and the icon."),
@@ -123,6 +128,7 @@ enum Action {
     ToggleLaunchAtLogin,
     TogglePercent,
     SetPoll(u32),
+    SetMenuFont(u32),
     ToggleShown(usize),
     AskReset,
     CancelReset,
@@ -256,7 +262,7 @@ impl SettingsWindow {
         match row {
             Row::Section(_) => SECTION_GAP + 8,
             Row::Note(_) => NOTE_HEIGHT,
-            Row::LaunchAtLogin | Row::ShowPercent | Row::PollInterval | Row::ResetAll => ROW_HEIGHT + ROW_GAP,
+            Row::LaunchAtLogin | Row::ShowPercent | Row::MenuTextSize | Row::PollInterval | Row::ResetAll => ROW_HEIGHT + ROW_GAP,
             Row::DeviceList => self.devices.len().max(1) as i32 * (ROW_HEIGHT + ROW_GAP),
             Row::AboutCard => ABOUT_CARD_HEIGHT + ROW_GAP,
             Row::Privacy => privacy_height() + ROW_GAP,
@@ -394,6 +400,11 @@ impl SettingsWindow {
                 let is_on = self.settings.shows_percent_in_icon;
                 self.draw_toggle_row(left, y, width, ("Show the lowest %", "Next to the glass in the menu bar"), is_on, Action::TogglePercent);
             }
+            Row::MenuTextSize => {
+                self.row_card(left, y, width, ROW_HEIGHT);
+                self.row_label(left, y, "Menu text size", "");
+                self.draw_stepper(left + width - 14, y, self.settings.menu_font_points);
+            }
             Row::PollInterval => {
                 self.row_card(left, y, width, ROW_HEIGHT);
                 self.row_label(left, y, "Check batteries every", "");
@@ -465,6 +476,31 @@ impl SettingsWindow {
             self.add_hit(x, top, segment, height, action);
             x += segment;
         }
+    }
+
+    /// Draws a minus and plus pair around the value, as NetSpeedGauge's size stepper. At either end of its
+    /// range a button looks switched off and cannot be clicked.
+    fn draw_stepper(&mut self, right: i32, y: i32, value: u32) {
+        let theme = self.theme;
+        let (size, top) = (30, y + 10);
+        let value_width = 76;
+        let plus_x = right - size;
+        let minus_x = plus_x - value_width - size;
+        let buttons = [(minus_x, ICON_MINUS, value.saturating_sub(1), value > MENU_FONT_POINTS_MIN), (plus_x, ICON_PLUS, value + 1, value < MENU_FONT_POINTS_MAX)];
+        for (x, icon, new_value, is_enabled) in buttons {
+            let action = Action::SetMenuFont(new_value);
+            let radius = CARD_RADIUS as f32;
+            if is_enabled {
+                let fill = if self.is_hover(action) { theme.button_hover } else { theme.button };
+                canvas::round_rect(x, top, size, size, radius, fill);
+                canvas::symbol(x + size / 2, top + size / 2, icon, 8.0, theme.text);
+                self.add_hit(x, top, size, size, action);
+            } else {
+                canvas::round_rect(x, top, size, size, radius, mix(theme.card, theme.button, DISABLED_FILL));
+                canvas::symbol(x + size / 2, top + size / 2, icon, 8.0, mix(theme.card, theme.muted, DISABLED_TEXT));
+            }
+        }
+        canvas::text(minus_x + size + value_width / 2, top + 5, &format!("{value} pt"), &self.fonts.body, theme.text, Align::Center);
     }
 
     /// Draws one row per device: its full name and details, a rename box, and a Show toggle.
@@ -583,6 +619,10 @@ impl SettingsWindow {
             Action::ToggleLaunchAtLogin => startup::set_enabled(!startup::is_enabled()),
             Action::TogglePercent => {
                 self.settings.shows_percent_in_icon = !self.settings.shows_percent_in_icon;
+                effects.apply = Some(self.settings.clone());
+            }
+            Action::SetMenuFont(points) => {
+                self.settings.menu_font_points = points.clamp(MENU_FONT_POINTS_MIN, MENU_FONT_POINTS_MAX);
                 effects.apply = Some(self.settings.clone());
             }
             Action::SetPoll(minutes) => {
@@ -999,7 +1039,7 @@ pub fn preview_theme(is_dark: bool) {
     }
 }
 
-/// Clicks an area as a user would, for checks: "page:N", "percent", "poll:N", "show:N", "ask_reset", "cancel_reset", "confirm_reset".
+/// Clicks an area as a user would, for checks: "page:N", "percent", "poll:N", "menu_font:N", "show:N", "ask_reset", "cancel_reset", "confirm_reset".
 /// Returns false when no such area is showing.
 pub fn click_for_checks(name: &str) -> bool {
     let (kind, number) = name.split_once(':').map_or((name, 0), |(kind, number)| (kind, number.parse().unwrap_or(0)));
@@ -1007,6 +1047,7 @@ pub fn click_for_checks(name: &str) -> bool {
         "page" => Action::Page(number),
         "percent" => Action::TogglePercent,
         "poll" => Action::SetPoll(number as u32),
+        "menu_font" => Action::SetMenuFont(number as u32),
         "show" => Action::ToggleShown(number),
         "ask_reset" => Action::AskReset,
         "cancel_reset" => Action::CancelReset,
