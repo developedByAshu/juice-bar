@@ -1,6 +1,6 @@
 use juicebar_shared::device::{Battery, Connection, Device, DeviceKind, NameSource};
 use juicebar_shared::names::{resolve_name, NameCandidates};
-use juicebar_shared::protocols::bytech::{build_request, parse_power_answer, Bytech};
+use juicebar_shared::protocols::bytech::{build_request, parse_event, parse_power_answer, Bytech, KeyboardEvent};
 use juicebar_shared::protocols::yuandaxin::{self, Yuandaxin};
 use juicebar_shared::protocols::{BatteryProtocol, Reading};
 use juicebar_shared::report::report_url;
@@ -144,6 +144,21 @@ fn yuandaxin_ignores_other_reports_and_stays_silent_without_a_status() {
     assert_eq!(yuandaxin::parse_status(&[0x04, 0x01, 0x04, 0x01, 0x00]), None);
     let mut silent = ReplayTransport::from_fixture("");
     assert_eq!(Yuandaxin.read_battery(&mut silent).unwrap(), Reading::NoAnswer);
+}
+
+fn hex_report(text: &str) -> Vec<u8> {
+    text.split_whitespace().map(|byte| u8::from_str_radix(byte, 16).unwrap()).collect()
+}
+
+#[test]
+fn bytech_reads_the_recorded_sleep_wake_and_battery_events() {
+    // Recorded on his Swarm 75 dongle, 28 Nov 2026 01:17 to 01:20.
+    assert_eq!(parse_event(&hex_report("13 0a 01 00 04 02 00 00 00 00 00 00 00 00 00 00 00 00 00 24")), Some(KeyboardEvent::Asleep));
+    assert_eq!(parse_event(&hex_report("13 0a 01 00 04 02 01 00 00 00 00 00 00 00 00 00 00 00 00 25")), Some(KeyboardEvent::Awake));
+    assert_eq!(parse_event(&hex_report("13 0a 01 00 04 05 47 01 00 00 00 00 00 00 00 00 00 00 00 6f")), Some(KeyboardEvent::Battery(Battery { percent: 71, is_charging: false })));
+    // A battery answer to our own request and a bad checksum are not events.
+    assert_eq!(parse_event(&hex_report("13 4a 01 00 02 48 01 00 00 00 00 00 00 00 00 00 00 00 00 a9")), None);
+    assert_eq!(parse_event(&hex_report("13 0a 01 00 04 02 01 00 00 00 00 00 00 00 00 00 00 00 00 26")), None);
 }
 
 #[test]
