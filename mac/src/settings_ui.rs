@@ -17,7 +17,7 @@ use juicebar_shared::settings::{HoverAction, Settings, MENU_FONT_POINTS_MAX, MEN
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
-use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSControl, NSFocusRingType, NSTextField, NSWindow};
+use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSControl, NSFocusRingType, NSTextField, NSTextView, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 use std::cell::RefCell;
 
@@ -58,6 +58,9 @@ const ICON_MINUS: &str = "minus";
 const ICON_PLUS: &str = "plus";
 const DISABLED_FILL: f32 = 0.35;
 const DISABLED_TEXT: f32 = 0.5;
+const RENAME_KEYS: &str = "Return to save \u{b7} Esc to cancel";
+const RENAME_SAVED: &str = "Saved";
+const RENAME_SAVED_SECONDS: f64 = 2.0;
 const ICON_CHECK: &str = "checkmark";
 const ICON_DONE: &str = "checkmark.circle.fill";
 const ICON_LOCK: &str = "lock.fill";
@@ -211,6 +214,11 @@ struct SettingsWindow {
     is_confirming_reset: bool,
     is_reset_done: bool,
     done_timer: Option<Retained<NSTimer>>,
+    /// Per rename box, text typed but not saved yet; None when the box matches the saved name.
+    unsaved: Vec<Option<String>>,
+    /// The row whose hint shows "Saved" for a moment after its rename was saved.
+    saved_row: Option<usize>,
+    saved_timer: Option<Retained<NSTimer>>,
 }
 
 thread_local! {
@@ -551,11 +559,27 @@ impl SettingsWindow {
             // fits, and the menu's shortened name only when it does not.
             let in_use = self.settings.renames.get(&device.id).cloned().unwrap_or_else(|| device.name.clone());
             let name = if canvas::text_width(&in_use, &self.fonts.body) <= room { in_use } else { short_name(&in_use) };
-            self.row_label(left, row_y, &name, &device_hint(device));
+            self.draw_device_label(left, row_y, index, &name, &device_hint(device));
             canvas::round_rect(box_x, row_y + (ROW_HEIGHT - FIELD_HEIGHT) / 2, FIELD_WIDTH, FIELD_HEIGHT, CARD_RADIUS as f32, theme.segment_track_on_card);
             let is_shown = !self.settings.hidden.contains(&device.id);
             self.draw_toggle(toggle_right, row_y, ROW_HEIGHT, is_shown);
             self.add_hit(toggle_right - TOGGLE_WIDTH - 8, row_y, TOGGLE_WIDTH + 22, ROW_HEIGHT, Action::ToggleShown(index));
+        }
+    }
+
+    /// Draws a device row's name and its second line: the details, "Return to save · Esc to cancel" while
+    /// its box has unsaved typing, or a green "Saved" for a moment after a save.
+    fn draw_device_label(&self, left: i32, y: i32, index: usize, name: &str, details: &str) {
+        let theme = self.theme;
+        let x = left + 14;
+        canvas::text(x, y + 7, name, &self.fonts.body, theme.text, Align::Left);
+        if self.saved_row == Some(index) {
+            canvas::symbol(x + 6, y + 27 + self.fonts.small.box_height / 2, ICON_DONE, 8.0, theme.good);
+            canvas::text(x + 16, y + 27, RENAME_SAVED, &self.fonts.small, theme.good, Align::Left);
+        } else if self.unsaved.get(index).is_some_and(Option::is_some) {
+            canvas::text(x, y + 27, RENAME_KEYS, &self.fonts.small, theme.muted, Align::Left);
+        } else {
+            canvas::text(x, y + 27, details, &self.fonts.small, theme.muted, Align::Left);
         }
     }
 
@@ -782,10 +806,11 @@ fn make_field(index: usize, text: &str, own_name: &str, font: &Font, theme: &The
     }
     let target = delegate();
     let target: &AnyObject = target.as_ref();
-    // SAFETY: the delegate lives for the whole app and answers settingChanged:.
+    // SAFETY: the delegate lives for the whole app and answers settingChanged: and the text delegate calls.
     unsafe {
         field.setTarget(Some(target));
         field.setAction(Some(sel!(settingChanged:)));
+        let _: () = objc2::msg_send![&*field, setDelegate: target];
     }
     field
 }
@@ -820,7 +845,11 @@ fn rebuild_fields() {
     let font = Font::system(10.0, WEIGHT_REGULAR);
     let fields: Vec<_> = texts.iter().zip(&names).enumerate().map(|(index, (text, name))| make_field(index, text, name, &font, &theme)).collect();
     fields.iter().for_each(|field| view.addSubview(field));
-    with_window(|state| state.fields = fields);
+    with_window(|state| {
+        state.unsaved = vec![None; fields.len()];
+        state.saved_row = None;
+        state.fields = fields;
+    });
 }
 
 /// Runs what a click asked for, with WINDOW unborrowed.
@@ -923,25 +952,127 @@ pub fn on_control_changed(sender: &AnyObject) {
     let Ok(index) = usize::try_from(control.tag() - FIELD_TAG_BASE) else {
         return;
     };
+    // Leaving the box saves what it holds, as before, now with the same "Saved" cue as Return.
     let text = control.stringValue().to_string();
-    let changed = with_window(|state| {
-        let id = state.devices.get(index)?.id.clone();
+    if let Some(settings) = with_window(|state| state.save_rename(index, &text)).flatten() {
+        apply(settings);
+        start_saved_cue();
+    }
+}
+
+impl SettingsWindow {
+    /// Saves a box's text as the device's rename (empty removes it) and returns the new settings when that
+    /// changed anything. The row then shows "Saved" if it is on screen.
+    fn save_rename(&mut self, index: usize, text: &str) -> Option<Settings> {
+        let id = self.devices.get(index)?.id.clone();
+        if let Some(unsaved) = self.unsaved.get_mut(index) {
+            *unsaved = None;
+        }
+        self.invalidate();
         let name = text.trim();
-        if state.settings.renames.get(&id).map_or("", String::as_str) == name {
+        if self.settings.renames.get(&id).map_or("", String::as_str) == name {
             return None;
         }
         if name.is_empty() {
-            state.settings.renames.remove(&id);
+            self.settings.renames.remove(&id);
         } else {
-            state.settings.renames.insert(id, name.to_string());
+            self.settings.renames.insert(id, name.to_string());
+        }
+        if self.page == DEVICES_PAGE {
+            self.saved_row = Some(index);
+        }
+        Some(self.settings.clone())
+    }
+
+    /// Returns a box's saved text: the rename, or empty so the device's own name shows in grey.
+    fn saved_rename(&self, index: usize) -> Option<String> {
+        let id = &self.devices.get(index)?.id;
+        Some(self.settings.renames.get(id).cloned().unwrap_or_default())
+    }
+}
+
+/// Returns which rename box a control is.
+fn field_index(control: &NSControl) -> Option<usize> {
+    usize::try_from(control.tag() - FIELD_TAG_BASE).ok()
+}
+
+/// Starts (or restarts) the 2 second "Saved" cue. Runs with WINDOW unborrowed.
+fn start_saved_cue() {
+    let timer = start_timer(RENAME_SAVED_SECONDS, sel!(renameSavedExpired:), false);
+    with_window(|state| {
+        if let Some(old) = state.saved_timer.replace(timer) {
+            old.invalidate();
+        }
+    });
+}
+
+/// Marks a row unsaved while its box differs from the saved name, so its hint shows the keys.
+pub fn on_rename_typed(control: &NSControl) {
+    let Some(index) = field_index(control) else {
+        return;
+    };
+    let text = control.currentEditor().map_or_else(|| control.stringValue().to_string(), |editor| editor.string().to_string());
+    with_window(|state| {
+        let differs = state.saved_rename(index).is_some_and(|saved| saved != text.trim());
+        if let Some(unsaved) = state.unsaved.get_mut(index) {
+            *unsaved = differs.then(|| text.clone());
+        }
+        if differs && state.saved_row == Some(index) {
+            state.saved_row = None;
         }
         state.invalidate();
-        Some(state.settings.clone())
+    });
+}
+
+/// Return in a rename box: saves at once and keeps the box focused. Returns true, as the key is handled.
+pub fn on_rename_return(control: &NSControl, text_view: &NSTextView) -> bool {
+    let Some(index) = field_index(control) else {
+        return false;
+    };
+    let text = text_view.string().to_string();
+    let saved = with_window(|state| {
+        let settings = state.save_rename(index, &text);
+        // Return always confirms, even when the name was already saved.
+        state.saved_row = Some(index);
+        settings
+    });
+    if let Some(Some(settings)) = &saved {
+        apply(settings.clone());
+    }
+    if saved.is_some() {
+        start_saved_cue();
+    }
+    true
+}
+
+/// Escape in a rename box: puts the saved name back, ends the edit and saves nothing. Returns true, as the key is handled.
+pub fn on_rename_cancel(control: &NSControl, text_view: &NSTextView) -> bool {
+    let Some(index) = field_index(control) else {
+        return false;
+    };
+    let saved = with_window(|state| {
+        if let Some(unsaved) = state.unsaved.get_mut(index) {
+            *unsaved = None;
+        }
+        state.invalidate();
+        state.saved_rename(index)
     })
     .flatten();
-    if let Some(settings) = changed {
-        apply(settings);
+    if let Some(saved) = saved {
+        // The box now holds the saved name, so ending the edit below finds nothing to save.
+        text_view.setString(&NSString::from_str(&saved));
+        end_editing();
     }
+    true
+}
+
+/// Hides the "Saved" cue after its moment.
+pub fn hide_rename_saved() {
+    with_window(|state| {
+        state.saved_row = None;
+        state.saved_timer = None;
+        state.invalidate();
+    });
 }
 
 /// Builds the window and its state without showing it.
@@ -965,6 +1096,9 @@ fn build(settings: Settings, devices: Vec<Device>) -> Retained<NSWindow> {
         is_confirming_reset: false,
         is_reset_done: false,
         done_timer: None,
+        unsaved: Vec::new(),
+        saved_row: None,
+        saved_timer: None,
     };
     WINDOW.with(|cell| *cell.borrow_mut() = Some(state));
     rebuild_fields();
@@ -1140,11 +1274,52 @@ pub fn type_rename_for_checks(index: usize, text: &str) -> bool {
         return false;
     };
     window.makeFirstResponder(Some(&field));
-    match field.currentEditor() {
-        Some(editor) => editor.setString(&NSString::from_str(text)),
-        None => field.setStringValue(&NSString::from_str(text)),
+    let Some(editor) = field.currentEditor() else {
+        return false;
+    };
+    // Typed through the field editor as keys would be, so the box's delegate hears each change.
+    // SAFETY: the field editor is an NSTextView, which answers both; a nil sender is allowed.
+    unsafe {
+        editor.selectAll(None);
+        let _: () = objc2::msg_send![&*editor, insertText: &*NSString::from_str(text)];
     }
     true
+}
+
+/// Sends Return or Escape to the rename box being edited, through the same path a key press takes, for checks.
+pub fn press_in_rename_for_checks(index: usize, is_return: bool) -> bool {
+    let Some(field) = with_window(|state| state.fields.get(index).cloned()).flatten() else {
+        return false;
+    };
+    let Some(editor) = field.currentEditor() else {
+        return false;
+    };
+    let command = if is_return { sel!(insertNewline:) } else { sel!(cancelOperation:) };
+    // SAFETY: doCommandBySelector: is NSTextView's own, which asks the box's delegate first.
+    let _: () = unsafe { objc2::msg_send![&*editor, doCommandBySelector: command] };
+    true
+}
+
+/// Finishes a rename by moving the focus away, as a click elsewhere does, for checks.
+pub fn leave_rename_for_checks() {
+    end_editing();
+}
+
+/// Paints the open window in both looks to `<base>_dark.png` and `<base>_light.png`, then restores its look, for checks.
+pub fn capture_both_looks_for_checks(base: &str) -> bool {
+    let restore = with_window(|state| state.theme.is_dark).unwrap_or(true);
+    let mut saved = true;
+    for (name, is_dark) in [("dark", true), ("light", false)] {
+        preview_theme(is_dark);
+        saved &= capture_to(&format!("{base}_{name}.png"));
+    }
+    preview_theme(restore);
+    saved
+}
+
+/// Returns whether a rename box is being edited, for checks.
+pub fn is_rename_focused_for_checks(index: usize) -> bool {
+    with_window(|state| state.fields.get(index).cloned()).flatten().is_some_and(|field| field.currentEditor().is_some())
 }
 
 /// Presses Escape in the window, for checks.

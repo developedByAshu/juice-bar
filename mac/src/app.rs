@@ -190,6 +190,11 @@ fn start_capture_if_asked() {
             start_timer(3.0, sel!(captureOpenMenu:), false);
             start_timer(9.0, sel!(captureFinish:), false);
         }
+        Ok("rename") => {
+            crate::settings_ui::open_settings();
+            start_timer(2.0, sel!(captureRename:), false);
+            start_timer(4.0, sel!(captureFinish:), false);
+        }
         Ok(CAPTURE_HOVER) => {
             start_timer(3.0, sel!(hoverFired:), false);
             start_timer(5.0, sel!(captureFinish:), false);
@@ -246,6 +251,36 @@ pub fn capture_reset() {
     if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_PATH") {
         eprintln!("capture: reset page saved: {}", crate::settings_ui::capture_to(&path));
     }
+}
+
+/// Walks the rename box as a user would: type, Return, type and Escape, clear and Return, type and click
+/// away. Each step is painted in both looks under JUICEBAR_CAPTURE_DIR. Used only by capture mode.
+pub fn capture_rename() {
+    use crate::settings_ui::{capture_both_looks_for_checks, is_rename_focused_for_checks, leave_rename_for_checks, press_in_rename_for_checks, show_page_for_checks, type_rename_for_checks};
+    let folder = std::env::var("JUICEBAR_CAPTURE_DIR").unwrap_or_default();
+    let shot = |name: &str| eprintln!("capture: {name} saved: {}", capture_both_looks_for_checks(&format!("{folder}/rename_{name}")));
+    show_page_for_checks(2);
+    eprintln!("capture: typed: {}", type_rename_for_checks(0, "Desk keyboard"));
+    log_renames("while typing, before Return");
+    shot("1_typing");
+    eprintln!("capture: pressed Return: {}", press_in_rename_for_checks(0, true));
+    log_renames("right after Return");
+    eprintln!("capture: box still focused after Return: {}", is_rename_focused_for_checks(0));
+    shot("2_saved");
+    type_rename_for_checks(0, "Oops typo");
+    shot("3_typing_again");
+    eprintln!("capture: pressed Escape: {}", press_in_rename_for_checks(0, false));
+    log_renames("after Escape");
+    eprintln!("capture: box still focused after Escape: {}", is_rename_focused_for_checks(0));
+    shot("4_cancelled");
+    type_rename_for_checks(0, "");
+    press_in_rename_for_checks(0, true);
+    log_renames("after clearing and Return");
+    shot("5_cleared");
+    type_rename_for_checks(1, "Travel mouse");
+    leave_rename_for_checks();
+    log_renames("after typing and clicking away");
+    shot("6_left");
 }
 
 /// Types a rename and closes the window with Escape before it is finished. Used only by capture mode.

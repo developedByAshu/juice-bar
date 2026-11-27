@@ -2,9 +2,9 @@
 
 use crate::{app, menu_ui, settings_ui};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
-use objc2_app_kit::{NSApplicationDelegate, NSMenu, NSMenuDelegate, NSMenuItem, NSWindowDelegate};
+use objc2_app_kit::{NSApplicationDelegate, NSControl, NSControlTextEditingDelegate, NSMenu, NSMenuDelegate, NSMenuItem, NSTextFieldDelegate, NSTextView, NSWindowDelegate};
 use objc2_foundation::{NSNotification, NSTimer};
 use std::cell::OnceCell;
 
@@ -42,6 +42,29 @@ define_class!(
         }
     }
 
+    // The rename boxes: typing marks a row unsaved, Return saves at once, Escape puts the saved name back.
+    unsafe impl NSControlTextEditingDelegate for AppDelegate {
+        #[unsafe(method(controlTextDidChange:))]
+        fn control_text_did_change(&self, notification: &NSNotification) {
+            if let Some(field) = notification.object().and_then(|object| object.downcast::<NSControl>().ok()) {
+                settings_ui::on_rename_typed(&field);
+            }
+        }
+
+        #[unsafe(method(control:textView:doCommandBySelector:))]
+        fn control_do_command(&self, control: &NSControl, text_view: &NSTextView, command: Sel) -> bool {
+            if command == sel!(insertNewline:) {
+                settings_ui::on_rename_return(control, text_view)
+            } else if command == sel!(cancelOperation:) {
+                settings_ui::on_rename_cancel(control, text_view)
+            } else {
+                false
+            }
+        }
+    }
+
+    unsafe impl NSTextFieldDelegate for AppDelegate {}
+
     unsafe impl NSWindowDelegate for AppDelegate {
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _notification: &NSNotification) {
@@ -53,6 +76,11 @@ define_class!(
         #[unsafe(method(iconClicked:))]
         fn icon_clicked(&self, _sender: Option<&AnyObject>) {
             app::on_icon_clicked();
+        }
+
+        #[unsafe(method(renameSavedExpired:))]
+        fn rename_saved_expired(&self, _timer: &NSTimer) {
+            settings_ui::hide_rename_saved();
         }
 
         #[unsafe(method(hoverFired:))]
@@ -115,6 +143,11 @@ define_class!(
         #[unsafe(method(captureReset:))]
         fn capture_reset(&self, _timer: &NSTimer) {
             app::capture_reset();
+        }
+
+        #[unsafe(method(captureRename:))]
+        fn capture_rename(&self, _timer: &NSTimer) {
+            app::capture_rename();
         }
 
         #[unsafe(method(captureCloseWhileEditing:))]
