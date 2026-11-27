@@ -22,7 +22,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, InvalidateRect, SetBkColor, SetTextColor, HBRUSH, HDC, HFONT, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Controls::{EM_SETCUEBANNER, EM_SETSEL};
+use windows_sys::Win32::UI::Controls::EM_SETSEL;
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
@@ -30,7 +30,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowTextLengthW, GetWindowTextW, IsWindow, LoadCursorW, LoadIconW,
     PostMessageW, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, CW_USEDEFAULT, ES_AUTOHSCROLL,
     IDC_ARROW, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOW, WM_CHAR, WM_CLOSE, WM_CTLCOLOREDIT, WM_DESTROY, WM_DPICHANGED,
-    WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
+    WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
     WM_SETFONT, WM_TIMER, WNDCLASSW, KillTimer, SetTimer, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE, DLGC_WANTALLKEYS,
 };
 
@@ -57,6 +57,14 @@ const CONTROL_HEIGHT: i32 = 30;
 const STEPPER_VALUE_WIDTH: i32 = 76;
 const TOGGLE_WIDTH: i32 = 40;
 const TOGGLE_HEIGHT: i32 = 20;
+// The rename controls, sizes from the Mac: a pencil on an idle row; a field with ✓ and ✕ while renaming.
+const EDIT_BUTTON: i32 = 26;
+const EDIT_BUTTON_GAP: i32 = 4;
+const FIELD_GAP: i32 = 16;
+const FIELD_HEIGHT: i32 = 30;
+const ICON_PENCIL: &str = "\u{E70F}";
+const ICON_SAVE: &str = "\u{E73E}";
+const ICON_CANCEL: &str = "\u{E711}";
 const DISABLED_FILL: f32 = 0.35;
 const DISABLED_TEXT: f32 = 0.5;
 // Devices rows start their name after the battery dot.
@@ -173,6 +181,7 @@ struct Fonts {
     small_icon: HFONT,
     heart: HFONT,
     lock: HFONT,
+    edit_icon: HFONT,
 }
 
 impl Fonts {
@@ -186,6 +195,7 @@ impl Fonts {
             small_icon: create_font(ICON_FONT, 8.0, 400, dpi),
             heart: create_font(ICON_FONT, 9.0, 400, dpi),
             lock: create_font(ICON_FONT, 15.0, 400, dpi),
+            edit_icon: create_font(ICON_FONT, 9.0, 400, dpi),
         }
     }
 }
@@ -194,7 +204,7 @@ impl Drop for Fonts {
     fn drop(&mut self) {
         // SAFETY: each font was created in new() and is released once here.
         unsafe {
-            for font in [self.body, self.strong, self.small, self.title, self.icon, self.small_icon, self.heart, self.lock] {
+            for font in [self.body, self.strong, self.small, self.title, self.icon, self.small_icon, self.heart, self.lock, self.edit_icon] {
                 DeleteObject(font);
             }
         }
@@ -269,7 +279,7 @@ fn page_blocks(state: &Window) -> Vec<Block> {
         ],
         Page::Devices => {
             let count = state.devices.borrow().len();
-            let mut blocks = vec![Block::Section("Your devices"), Block::Note("Switch a device off to hide it from the menu.\nRename gives it a name you will recognise.")];
+            let mut blocks = vec![Block::Section("Your devices"), Block::Note("Click the pencil to give a device a name you will recognise.\nSwitch a device off to leave it out of the menu and the icon.")];
             if count == 0 {
                 blocks.push(Block::NoDevices);
             }
@@ -370,16 +380,16 @@ fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
             Block::Device(index) => {
                 let toggle = toggle_rect(right, top, dpi);
                 controls.push((Control::ShowToggle(index), toggle));
+                let (save, cancel) = edit_buttons(toggle.left, top, dpi);
                 if is_renaming(state, devices.get(index)) {
-                    let (save, cancel) = rename_buttons(canvas, state.fonts.body, toggle.left - scale(14, dpi), top, dpi);
                     controls.push((Control::RenameSave(index), save));
                     controls.push((Control::RenameCancel(index), cancel));
                     continue;
                 }
-                let rename = button_rect(canvas, state.fonts.body, "Rename", toggle.left - scale(14, dpi), top, dpi);
-                controls.push((Control::Rename(index), rename));
+                // The pencil sits where ✕ shows while renaming, as on the Mac.
+                controls.push((Control::Rename(index), cancel));
                 if devices.get(index).is_some_and(|device| needs_name_confirm(device, &settings)) {
-                    controls.push((Control::ConfirmName(index), button_rect(canvas, state.fonts.body, "Keep this name", rename.left - scale(8, dpi), top, dpi)));
+                    controls.push((Control::ConfirmName(index), button_rect(canvas, state.fonts.body, "Keep this name", cancel.left - scale(8, dpi), top, dpi)));
                 }
             }
             _ => {}
@@ -640,17 +650,14 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                 let name_x = left + scale(DEVICE_TEXT_LEFT, dpi);
                 let first_control = rect_of(Control::ConfirmName(index)).or(rect_of(Control::Rename(index))).map_or(right, |rect| rect.left);
                 if is_renaming(state, Some(device)) {
-                    // A Windows 11 text box: rounded edge, a darker inside and the accent line along the bottom.
-                    let field = rename_field(canvas, state, top, right);
-                    let (x, y, w, h) = (field.left, field.top, field.right - field.left, field.bottom - field.top);
-                    let radius = scale(4, dpi) as f32;
-                    canvas.round_rect(x, y, w, h, radius, mix(theme.card, theme.text, 0.18), 1.0);
-                    canvas.round_rect(x + 1, y + 1, w - 2, h - 2, radius - 1.0, rename_fill(&theme), 1.0);
-                    canvas.round_rect(x + 1, y + h - scale(2, dpi), w - 2, scale(2, dpi), 0.0, theme.highlight, 1.0);
-                    for (control, label, is_accent) in [(Control::RenameSave(index), "Save", true), (Control::RenameCancel(index), "Cancel", false)] {
-                        if let Some(rect) = rect_of(control) {
-                            draw_button(canvas, state, &rect, label, control, is_accent);
-                        }
+                    // As on the Mac: the name swaps for a filled field holding it, with ✓ to save and ✕ to cancel.
+                    let field = rename_field(state, top, right);
+                    canvas.round_rect(field.left, field.top, field.right - field.left, field.bottom - field.top, scale(CARD_RADIUS, dpi) as f32, field_fill(&theme), 1.0);
+                    if let Some(rect) = rect_of(Control::RenameSave(index)) {
+                        draw_icon_button(canvas, state, &rect, ICON_SAVE, theme.highlight, Control::RenameSave(index));
+                    }
+                    if let Some(rect) = rect_of(Control::RenameCancel(index)) {
+                        draw_icon_button(canvas, state, &rect, ICON_CANCEL, theme.muted, Control::RenameCancel(index));
                     }
                 } else if state.saved_id.as_deref() == Some(device.id.as_str()) {
                     let good = if theme.is_dark { GOOD_DARK } else { GOOD_LIGHT };
@@ -661,7 +668,7 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                     row_label(canvas, state, name_x, top, &device.name, &hint, first_control - scale(12, dpi) - name_x);
                 }
                 if let Some(rect) = rect_of(Control::Rename(index)) {
-                    draw_button(canvas, state, &rect, "Rename", Control::Rename(index), false);
+                    draw_icon_button(canvas, state, &rect, ICON_PENCIL, theme.muted, Control::Rename(index));
                 }
                 if let Some(rect) = rect_of(Control::ConfirmName(index)) {
                     draw_button(canvas, state, &rect, "Keep this name", Control::ConfirmName(index), true);
@@ -728,7 +735,7 @@ fn activate(control: Control) {
     let devices = with_window(|state| device_list(state)).unwrap_or_default();
     match control {
         Control::Nav(page) => {
-            close_rename(true);
+            close_rename(false);
             with_window(|state| {
                 state.page = page;
                 state.scroll = 0;
@@ -863,7 +870,7 @@ fn draw_segments(canvas: &mut Canvas, state: &Window, controls: &[(Control, RECT
     }).collect();
     let (Some((_, first)), Some((_, last))) = (segments.first(), segments.last()) else { return };
     let radius = scale(CARD_RADIUS, dpi) as f32;
-    let track = if theme.is_dark { 0x232323 } else { 0xE2E2E2 };
+    let track = field_fill(&theme);
     canvas.round_rect(first.left, first.top, last.right - first.left, first.bottom - first.top, radius, track, 1.0);
     let inset = scale(3, dpi);
     for (option, rect) in &segments {
@@ -887,9 +894,9 @@ fn sheet_fonts(state: &Window) -> SheetFonts {
     SheetFonts { title: state.fonts.strong, body: state.fonts.body, small: state.fonts.small, icon: state.fonts.lock }
 }
 
-/// Returns the inside colour of a text box, as Windows 11 draws one: darker than the card in dark mode.
-fn rename_fill(theme: &Theme) -> u32 {
-    if theme.is_dark { 0x1E1E1E } else { 0xFFFFFF }
+/// Returns the sunken fill of a segmented choice's track, which the rename field shares, as on the Mac.
+fn field_fill(theme: &Theme) -> u32 {
+    if theme.is_dark { 0x232323 } else { 0xE2E2E2 }
 }
 
 /// Checks whether this device's name is being edited.
@@ -897,26 +904,47 @@ fn is_renaming(state: &Window, device: Option<&Device>) -> bool {
     device.is_some_and(|device| state.edit.as_ref().is_some_and(|(_, id)| id == &device.id))
 }
 
-/// Returns the Save and Cancel buttons shown while renaming, Save ending at the given right edge.
-fn rename_buttons(canvas: &Canvas, font: HFONT, right: i32, top: i32, dpi: u32) -> (RECT, RECT) {
-    let save = button_rect(canvas, font, "Save", right, top, dpi);
-    let cancel = button_rect(canvas, font, "Cancel", save.left - scale(8, dpi), top, dpi);
-    (save, cancel)
+/// Returns the ✓ and ✕ icon buttons of a device row, ✕ ending FIELD_GAP before the toggle. The idle
+/// pencil sits where ✕ does. Sizes from the Mac (EDIT_BUTTON, EDIT_BUTTON_GAP).
+fn edit_buttons(toggle_left: i32, top: i32, dpi: u32) -> (RECT, RECT) {
+    let size = scale(EDIT_BUTTON, dpi);
+    let button_top = top + (scale(ROW_HEIGHT, dpi) - size) / 2;
+    let cancel_left = toggle_left - scale(FIELD_GAP, dpi) - size;
+    let save_left = cancel_left - scale(EDIT_BUTTON_GAP, dpi) - size;
+    (
+        RECT { left: save_left, top: button_top, right: save_left + size, bottom: button_top + size },
+        RECT { left: cancel_left, top: button_top, right: cancel_left + size, bottom: button_top + size },
+    )
 }
 
-/// Returns the text box drawn over a device's name while renaming, from the name to the buttons.
-fn rename_field(canvas: &Canvas, state: &Window, top: i32, right: i32) -> RECT {
+/// Draws a small icon button: the glyph alone, with a soft fill under it and the text colour on hover.
+fn draw_icon_button(canvas: &mut Canvas, state: &Window, rect: &RECT, icon: &str, color: u32, control: Control) {
+    let (theme, dpi) = (state.theme, state.dpi);
+    let is_hovered = state.hovered == Some(control);
+    if is_hovered {
+        canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, scale(CARD_RADIUS, dpi) as f32, theme.button_hover, 1.0);
+    }
+    let ink = if is_hovered && color == theme.muted { theme.text } else { color };
+    let glyph_top = rect.top + (rect.bottom - rect.top - canvas.text_height(state.fonts.edit_icon)) / 2;
+    canvas.text((rect.left + rect.right) / 2, glyph_top, icon, state.fonts.edit_icon, ink, Align::Center);
+    if state.focused == Some(control) {
+        draw_focus(canvas, &theme, rect, dpi);
+    }
+}
+
+/// Returns the field drawn over a device's name while renaming, from the name to 8 px before ✓.
+fn rename_field(state: &Window, top: i32, right: i32) -> RECT {
     let dpi = state.dpi;
     let (left, _) = content_columns(dpi);
-    let toggle = toggle_rect(right, top, dpi);
-    let (_, cancel) = rename_buttons(canvas, state.fonts.body, toggle.left - scale(14, dpi), top, dpi);
-    let field_top = top + scale(10, dpi);
-    RECT { left: left + scale(DEVICE_TEXT_LEFT - 8, dpi), top: field_top, right: cancel.left - scale(12, dpi), bottom: field_top + scale(CONTROL_HEIGHT, dpi) }
+    let (save, _) = edit_buttons(toggle_rect(right, top, dpi).left, top, dpi);
+    let field_top = top + (scale(ROW_HEIGHT, dpi) - scale(FIELD_HEIGHT, dpi)) / 2;
+    RECT { left: left + scale(DEVICE_TEXT_LEFT - 8, dpi), top: field_top, right: save.left - scale(8, dpi), bottom: field_top + scale(FIELD_HEIGHT, dpi) }
 }
 
-/// Opens a text box over a device's name for renaming. Enter or leaving the box saves; Esc cancels.
+/// Opens a field over a device's name holding the name in use, all selected. Return or ✓ saves;
+/// Esc, ✕ or a click anywhere else cancels, as on the Mac.
 fn open_rename(index: usize, device: &Device) {
-    close_rename(true);
+    close_rename(false);
     with_window(|state| {
         let dpi = state.dpi;
         let Some(row_top) = placed_blocks(state).into_iter().find(|(block, _)| *block == Block::Device(index)).map(|(_, top)| top) else { return };
@@ -926,17 +954,16 @@ fn open_rename(index: usize, device: &Device) {
             GetClientRect(state.window, &mut client);
             let canvas = Canvas::new(client.right, 1);
             let (content_left, content_width) = content_columns(dpi);
-            let field = rename_field(&canvas, state, row_top, content_left + content_width - scale(14, dpi));
+            let field = rename_field(state, row_top, content_left + content_width - scale(14, dpi));
             let text_height = canvas.text_height(state.fonts.body);
             let left = field.left + scale(10, dpi);
             let top = field.top + (field.bottom - field.top - text_height) / 2;
             let width = field.right - field.left - scale(20, dpi);
             let height = text_height;
             let class = to_wide("EDIT");
-            // The box holds the saved rename, or stays empty with the device's own name in grey as its hint.
-            let rename = state.settings.borrow().renames.get(&device.id).cloned().unwrap_or_default();
-            let text = to_wide(&rename);
-            let hint = to_wide(&own_name(state, &device.id));
+            // The field opens holding the name in use: the rename, else the device's own name.
+            let in_use = state.settings.borrow().renames.get(&device.id).cloned().unwrap_or_else(|| own_name(state, &device.id));
+            let text = to_wide(&in_use);
             let edit = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -953,7 +980,6 @@ fn open_rename(index: usize, device: &Device) {
             );
             SendMessageW(edit, WM_SETFONT, state.fonts.body as usize, 1);
             SendMessageW(edit, EM_SETSEL, 0, -1);
-            SendMessageW(edit, EM_SETCUEBANNER, 1, hint.as_ptr() as isize);
             SetWindowSubclass(edit, Some(edit_proc), EDIT_SUBCLASS, 0);
             SetFocus(edit);
             state.edit = Some((edit, device.id.clone()));
@@ -962,7 +988,24 @@ fn open_rename(index: usize, device: &Device) {
     invalidate();
 }
 
-/// Closes the rename box, saving its text when `keep` is true. An empty name removes the rename.
+/// Checks whether a point is on the drawn rename field, its padding around the text box included.
+fn is_in_rename_field(x: i32, y: i32) -> bool {
+    with_window(|state| {
+        state.edit.as_ref()?;
+        let row_top = placed_blocks(state).into_iter().find_map(|(block, top)| match block {
+            Block::Device(index) if is_renaming(state, device_list(state).get(index)) => Some(top),
+            _ => None,
+        })?;
+        let (content_left, content_width) = content_columns(state.dpi);
+        let field = rename_field(state, row_top, content_left + content_width - scale(14, state.dpi));
+        Some(x >= field.left && x < field.right && y >= field.top && y < field.bottom)
+    })
+    .flatten()
+    .unwrap_or(false)
+}
+
+/// Closes the rename field, saving its text when `keep` is true. An empty name, or the device's own
+/// name, removes the rename.
 fn close_rename(keep: bool) {
     let Some(Some((edit, id))) = with_window(|state| state.edit.take()) else { return };
     // SAFETY: the edit box is a live child of the settings window until destroyed here.
@@ -977,9 +1020,10 @@ fn close_rename(keep: bool) {
     if keep {
         with_window(|state| {
             {
+                let own = own_name(state, &id);
                 let mut settings = state.settings.borrow_mut();
                 let name = text.trim();
-                if name.is_empty() {
+                if name.is_empty() || name == own {
                     settings.renames.remove(&id);
                 } else {
                     settings.renames.insert(id.clone(), name.to_string());
@@ -1008,11 +1052,7 @@ unsafe extern "system" fn edit_proc(edit: HWND, message: u32, wparam: WPARAM, lp
         }
         // Enter and Esc beep in a single-line box unless their characters are swallowed too.
         WM_CHAR if wparam == 13 || wparam == 27 => 0,
-        WM_KILLFOCUS => {
-            let result = DefSubclassProc(edit, message, wparam, lparam);
-            close_rename(true);
-            result
-        }
+        // Losing focus no longer saves: only Return or ✓ saves, as on the Mac.
         _ => DefSubclassProc(edit, message, wparam, lparam),
     }
 }
@@ -1068,7 +1108,7 @@ fn scroll_by(delta: i32) {
         let visible = client.bottom - scale(HEADER_HEIGHT, state.dpi);
         state.scroll = (state.scroll + delta).clamp(0, (content_height(state) - visible).max(0));
     });
-    close_rename(true);
+    close_rename(false);
     invalidate();
 }
 
@@ -1120,7 +1160,12 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
                 invalidate();
                 return 0;
             }
-            if let Some(control) = hit_test(x, y) {
+            let control = hit_test(x, y);
+            // Only ✓ or Return saves a rename; a click anywhere else ends it unsaved, as on the Mac.
+            if !matches!(control, Some(Control::RenameSave(_) | Control::RenameCancel(_) | Control::Rename(_))) && !is_in_rename_field(x, y) {
+                close_rename(false);
+            }
+            if let Some(control) = control {
                 activate(control);
             }
             0
@@ -1167,14 +1212,14 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
             if let Some((theme, brush)) = colors {
                 let swap = |color: u32| ((color & 0xFF) << 16) | (color & 0xFF00) | ((color >> 16) & 0xFF);
                 SetTextColor(device_context, swap(theme.text));
-                SetBkColor(device_context, swap(rename_fill(&theme)));
+                SetBkColor(device_context, swap(field_fill(&theme)));
                 return brush as LRESULT;
             }
             DefWindowProcW(window, message, wparam, lparam)
         }
         WM_DPICHANGED => {
             let dpi = (wparam & 0xFFFF) as u32;
-            close_rename(true);
+            close_rename(false);
             with_window(|state| {
                 state.dpi = dpi;
                 state.fonts = Fonts::new(dpi);
@@ -1245,7 +1290,7 @@ fn listen_for_theme() {
             // SAFETY: the brush was made for the old theme and is replaced once here.
             unsafe {
                 DeleteObject(state.edit_brush);
-                state.edit_brush = CreateSolidBrush(swap_rgb(rename_fill(&state.theme)));
+                state.edit_brush = CreateSolidBrush(swap_rgb(field_fill(&state.theme)));
             }
         });
         invalidate();
@@ -1317,7 +1362,7 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
                 focused: None,
                 scroll: 0,
                 edit: None,
-                edit_brush: CreateSolidBrush(swap_rgb(rename_fill(&theme))),
+                edit_brush: CreateSolidBrush(swap_rgb(field_fill(&theme))),
                 shows_reset_done: false,
                 saved_id: None,
             });
