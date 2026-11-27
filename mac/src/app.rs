@@ -41,6 +41,9 @@ struct App {
     last_read: std::collections::HashMap<String, std::time::Instant>,
     /// Keyboards whose dongle said they fell asleep; these show as asleep at once, without the grace.
     asleep: Vec<(u16, u16)>,
+    /// Each keyboard's last % from just before it fell asleep (row id to battery), put back the moment it
+    /// wakes, so a wake read that misses does not leave the row blank until the next check.
+    slept: std::collections::HashMap<String, juicebar_shared::device::Battery>,
 }
 
 thread_local! {
@@ -70,7 +73,7 @@ pub fn finish_startup() {
     let settings = Settings::load();
     let poll_timer = Some(start_timer(f64::from(settings.poll_minutes) * 60.0, sel!(poll:), true));
     APP.with(|cell| {
-        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false, open_popup: None, hover_timer: None, last_read: std::collections::HashMap::new(), asleep: Vec::new() });
+        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false, open_popup: None, hover_timer: None, last_read: std::collections::HashMap::new(), asleep: Vec::new(), slept: std::collections::HashMap::new() });
     });
     with_app(sync_item_menu);
     watch_system_events();
@@ -510,11 +513,29 @@ fn on_keyboard_event(vendor_id: u16, product_id: u16, event: juicebar_shared::pr
         }
     });
     if event == KeyboardEvent::Awake {
+        // Show the % it had before sleeping at once, and count it as fresh so a missed wake read keeps it.
+        with_app(|app| {
+            let now = std::time::Instant::now();
+            for scanned in app.scanned.iter_mut().filter(|scanned| scanned.device.vendor_id == vendor_id && scanned.device.product_id == product_id) {
+                if scanned.device.battery.is_none() {
+                    if let Some(battery) = app.slept.remove(&scanned.device.id) {
+                        scanned.device.battery = Some(battery);
+                        app.last_read.insert(scanned.device.id.clone(), now);
+                    }
+                }
+            }
+            rebuild(app);
+        });
         refresh();
         return;
     }
     with_app(|app| {
         for scanned in app.scanned.iter_mut().filter(|scanned| scanned.device.vendor_id == vendor_id && scanned.device.product_id == product_id) {
+            if event == KeyboardEvent::Asleep {
+                if let Some(battery) = scanned.device.battery {
+                    app.slept.insert(scanned.device.id.clone(), battery);
+                }
+            }
             // A push carries only the %: it keeps the charging state the last real reading gave.
             scanned.device.battery = match event {
                 KeyboardEvent::Battery(pushed) => Some(juicebar_shared::protocols::bytech::with_pushed_percent(scanned.device.battery, pushed)),
