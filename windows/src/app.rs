@@ -19,9 +19,10 @@ use juicebar_shared::scan::{build_device, probe_usb_device, scan_dongles, Scanne
 use juicebar_shared::settings::{ClickAction, HoverAction, Settings};
 use juicebar_shared::tone::{icon_tone, lowest_percent};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
 use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, PostMessageW, SetCoalescableTimer, MB_ICONINFORMATION, MB_OK, SW_SHOWNORMAL};
@@ -99,6 +100,10 @@ pub struct App {
     probed: Rc<RefCell<BTreeMap<String, &'static str>>>,
     is_scanning: bool,
     is_scan_wanted: bool,
+    /// When each device last gave a %, so one missed read does not blank a good one.
+    last_read: HashMap<String, Instant>,
+    /// Keyboards whose dongle said they fell asleep; these show as asleep at once, without the grace.
+    asleep: Vec<(u16, u16)>,
 }
 
 thread_local! {
@@ -245,6 +250,26 @@ pub fn tooltip_text(devices: &[Device]) -> String {
     text
 }
 
+/// How long a device that just missed one read keeps its last %. A mouse that sleeps between reports
+/// or a keyboard that answers late must not blank a % that was fine a minute ago.
+pub const KEEP_READING_FOR: Duration = Duration::from_secs(30 * 60);
+
+/// Fills a missed reading with the device's last %, unless its dongle said it is asleep or the last
+/// reading is older than KEEP_READING_FOR. Records when each device last answered. Mirrors the Mac.
+pub fn keep_recent_readings(new: &mut [Device], old: &[Device], last_read: &mut HashMap<String, Instant>, asleep: &[(u16, u16)], now: Instant) {
+    for device in new.iter_mut() {
+        if device.battery.is_some() {
+            last_read.insert(device.id.clone(), now);
+            continue;
+        }
+        let is_asleep = asleep.contains(&(device.vendor_id, device.product_id));
+        let is_recent = last_read.get(&device.id).is_some_and(|read| now.duration_since(*read) < KEEP_READING_FOR);
+        if !is_asleep && is_recent {
+            device.battery = old.iter().find(|previous| previous.id == device.id).and_then(|previous| previous.battery);
+        }
+    }
+}
+
 /// Opens a web address in the user's browser.
 pub fn open_url(url: &str) {
     let (verb, target) = (to_wide("open"), to_wide(url));
@@ -270,6 +295,8 @@ impl App {
             probed: Rc::new(RefCell::new(BTreeMap::new())),
             is_scanning: false,
             is_scan_wanted: false,
+            last_read: HashMap::new(),
+            asleep: Vec::new(),
         };
         create_status_icon(window);
         crate::menu_ui::set_menu_owner(window);
@@ -302,7 +329,9 @@ impl App {
         let Some(result) = SCAN_RESULT.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() else {
             return;
         };
-        *self.devices.borrow_mut() = result.devices;
+        let mut devices = result.devices;
+        keep_recent_readings(&mut devices, &self.devices.borrow(), &mut self.last_read, &self.asleep, Instant::now());
+        *self.devices.borrow_mut() = devices;
         self.interfaces = result.interfaces;
         if let Some((id, found)) = &result.probe {
             if *found {
@@ -330,6 +359,10 @@ impl App {
         let events = std::mem::take(&mut *KEYBOARD_EVENTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
         let mut changed = false;
         for (vendor_id, product_id, event) in events {
+            self.asleep.retain(|ids| *ids != (vendor_id, product_id));
+            if event == KeyboardEvent::Asleep {
+                self.asleep.push((vendor_id, product_id));
+            }
             if event == KeyboardEvent::Awake {
                 self.refresh();
                 continue;
@@ -340,6 +373,9 @@ impl App {
             };
             for device in self.devices.borrow_mut().iter_mut().filter(|device| device.vendor_id == vendor_id && device.product_id == product_id) {
                 device.battery = battery;
+                if battery.is_some() {
+                    self.last_read.insert(device.id.clone(), Instant::now());
+                }
                 changed = true;
             }
         }

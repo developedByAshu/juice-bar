@@ -250,3 +250,22 @@ fn taskbar_pin_matches_its_own_program_whatever_the_case() {
     assert!(is_same_program(r"C:\Users\a\AppData\Local\Programs\JuiceBar\JuiceBar.exe", r"c:\users\a\appdata\local\programs\juicebar\JUICEBAR.EXE"));
     assert!(!is_same_program(r"D:\juice-bar\target\release\JuiceBar.exe", r"C:\Users\a\AppData\Local\Programs\JuiceBar\JuiceBar.exe"));
 }
+
+#[test]
+fn a_missed_read_keeps_the_last_percent_unless_the_keyboard_said_it_is_asleep() {
+    use juicebar_windows::app::{keep_recent_readings, KEEP_READING_FOR};
+    use std::collections::HashMap;
+    use std::time::Instant;
+    let old = vec![device("Kreo Swarm 75", Some((75, false)), Some("bytech"))];
+    let start = Instant::now();
+    let mut last_read = HashMap::from([(old[0].id.clone(), start)]);
+    let mut missed = vec![device("Kreo Swarm 75", None, Some("bytech"))];
+    keep_recent_readings(&mut missed, &old, &mut last_read, &[], start);
+    assert_eq!(missed[0].battery.map(|battery| battery.percent), Some(75), "a recent % survives one missed read");
+    let mut asleep = vec![device("Kreo Swarm 75", None, Some("bytech"))];
+    keep_recent_readings(&mut asleep, &old, &mut last_read, &[(0x04F3, 0x026F)], start);
+    assert_eq!(asleep[0].battery, None, "the dongle's sleep event blanks it at once");
+    let mut stale = vec![device("Kreo Swarm 75", None, Some("bytech"))];
+    keep_recent_readings(&mut stale, &old, &mut last_read, &[], start + KEEP_READING_FOR);
+    assert_eq!(stale[0].battery, None, "after 30 minutes the old % is dropped");
+}
