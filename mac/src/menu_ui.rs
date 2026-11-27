@@ -15,7 +15,7 @@ use juicebar_shared::tone::tone_for_percent;
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
-use objc2_app_kit::{NSAppearanceCustomization, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow};
+use objc2_app_kit::{NSAppearanceCustomization, NSAutoresizingMaskOptions, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSTrackingArea, NSTrackingAreaOptions, NSView, NSWindow};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 use std::cell::{Cell, RefCell};
 
@@ -26,7 +26,6 @@ const EMPTY_TEXT: &str = "No devices found";
 const MENU_WIDTH: f64 = 164.0;
 const SUMMARY_HEIGHT: f64 = 34.0;
 const ROW_HEIGHT: f64 = 32.0;
-const DIVIDER_HEIGHT: f64 = 9.0;
 const PADDING: f64 = 5.0;
 const HOVER_RADIUS: f64 = 5.0;
 const ICON_POINTS: f64 = 10.0;
@@ -52,15 +51,25 @@ const ICON_BOLT: &str = "bolt.fill";
 const NOT_CONNECTED_SYMBOL: &str = "antenna.radiowaves.left.and.right.slash";
 const NOT_CONNECTED_TEXT: &str = "Not connected";
 
+/// Which popup the menu bar item shows, as NetSpeedGauge splits its card and menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PopupKind {
+    /// Left click and hover: the header and one row per device.
+    Devices,
+    /// Right click: Settings and Quit.
+    Actions,
+}
+
 /// What one row of the menu shows.
 #[derive(Clone)]
 enum MenuRow {
     Header,
     Device(Device),
     Empty,
-    Divider,
     Settings,
     Quit,
+    /// The battery card's bottom padding, where the menu has Settings and Quit.
+    Spacer,
 }
 
 /// What sits at a device row's right edge.
@@ -79,7 +88,6 @@ struct Metrics {
     min_width: i32,
     summary_height: i32,
     row_height: i32,
-    divider_height: i32,
     padding: i32,
     hover_radius: f32,
     icon_points: f64,
@@ -112,7 +120,6 @@ impl Metrics {
             min_width: length(MENU_WIDTH),
             summary_height,
             row_height,
-            divider_height: length(DIVIDER_HEIGHT),
             padding: length(PADDING),
             hover_radius: (HOVER_RADIUS * scale) as f32,
             icon_points: ICON_POINTS * scale,
@@ -318,9 +325,9 @@ impl MenuRowView {
         let metrics = Metrics::new(font_points);
         let height = match row {
             MenuRow::Header => metrics.summary_height + metrics.padding,
-            MenuRow::Divider => metrics.divider_height,
             // The last row carries the menu's bottom padding, as in NetSpeedGauge.
             MenuRow::Quit => metrics.row_height + metrics.padding,
+            MenuRow::Spacer => metrics.padding,
             _ => metrics.row_height,
         };
         let frame = NSRect::new(NSPoint::ZERO, NSSize::new(f64::from(width), f64::from(height)));
@@ -368,8 +375,8 @@ impl MenuRowView {
                 canvas::text(metrics.header_x, metrics.header_top, "Juice Bar", &metrics.small, theme.muted, Align::Left);
                 canvas::round_rect(padding, metrics.summary_height, divider_width, 1, 0.0, theme.border);
             }
-            MenuRow::Divider => canvas::round_rect(padding, metrics.divider_height / 2, divider_width, 1, 0.0, theme.border),
             MenuRow::Empty => canvas::text(metrics.label_x, metrics.label_top, EMPTY_TEXT, &metrics.body, theme.muted, Align::Left),
+            MenuRow::Spacer => {}
             MenuRow::Settings => {
                 label("gearshape", "Settings");
                 canvas::text_ink_right(right, metrics.label_top, "⌘,", &metrics.body, theme.muted);
@@ -416,7 +423,7 @@ impl MenuRowView {
                 menu.cancelTracking();
                 on_report(item.tag());
             }
-            MenuRow::Header | MenuRow::Divider | MenuRow::Empty => {}
+            MenuRow::Header | MenuRow::Empty | MenuRow::Spacer => {}
             _ if wants_report => {}
             _ => {
                 let index = menu.indexOfItem(&item);
@@ -460,52 +467,117 @@ pub fn name_gap_for_checks(devices: &[Device], font_points: u32) -> (i32, i32, i
     (width, width - metrics.right_inset - right_column_width(&metrics) - (metrics.label_x + longest), metrics.name_gap)
 }
 
-/// Fills the menu: header, one row per device, a divider, then Settings and Quit with their shortcuts.
-/// As in NetSpeedGauge, every row is drawn inside ONE panel item: separate view items each get spacing
-/// from macOS, which left about 40 pt empty under Quit. Each row keeps a hidden item of its own, so its
-/// action, tag and shortcut (⌘, and ⌘Q) still work while the menu is open.
-pub fn show_menu(menu: &NSMenu, devices: &[Device], font_points: u32) {
-    menu.removeAllItems();
-    let width = menu_width(devices, &Metrics::new(font_points));
-    let rows = RefCell::new(Vec::<Retained<MenuRowView>>::new());
-    let add = |item: Retained<NSMenuItem>, row: MenuRow, tooltip: Option<String>| {
-        let view = MenuRowView::create(row, menu.numberOfItems() as usize, width, font_points);
-        if let Some(text) = tooltip {
-            view.setToolTip(Some(&NSString::from_str(&text)));
-        }
-        item.setHidden(true);
-        item.setAllowsKeyEquivalentWhenHidden(true);
-        menu.addItem(&item);
-        rows.borrow_mut().push(view);
-    };
-    add(action_item(None, "", -1), MenuRow::Header, None);
+fn settings_item() -> Retained<NSMenuItem> {
+    targeted_item(sel!(openSettings:), ",", -1)
+}
+
+fn quit_item() -> Retained<NSMenuItem> {
+    action_item(Some(sel!(terminate:)), "q", -1)
+}
+
+/// Returns the rows to show, each with its item (which holds the action, tag and shortcut) and hover text.
+/// The devices popup is the header and one row per device; the actions popup is Settings and Quit.
+fn row_list(devices: &[Device], kind: PopupKind) -> Vec<(Retained<NSMenuItem>, MenuRow, Option<String>)> {
+    if kind == PopupKind::Actions {
+        // The top padding matches the bottom one, which the Quit row carries.
+        return vec![(action_item(None, "", -1), MenuRow::Spacer, None), (settings_item(), MenuRow::Settings, None), (quit_item(), MenuRow::Quit, None)];
+    }
+    let mut rows = vec![(action_item(None, "", -1), MenuRow::Header, None)];
     if devices.is_empty() {
-        add(action_item(None, "", -1), MenuRow::Empty, None);
+        rows.push((action_item(None, "", -1), MenuRow::Empty, None));
     }
     for (index, device) in devices.iter().enumerate() {
         // An unknown device runs Try to detect on click; a known one opens Settings.
         let action = if device.is_unrecognised() { sel!(tryToDetect:) } else { sel!(rowClicked:) };
-        add(targeted_item(action, "", index as isize), MenuRow::Device(device.clone()), Some(row_tooltip(device)));
+        rows.push((targeted_item(action, "", index as isize), MenuRow::Device(device.clone()), Some(row_tooltip(device))));
     }
-    add(action_item(None, "", -1), MenuRow::Divider, None);
-    add(targeted_item(sel!(openSettings:), ",", -1), MenuRow::Settings, None);
-    add(action_item(Some(sel!(terminate:)), "q", -1), MenuRow::Quit, None);
+    rows.push((action_item(None, "", -1), MenuRow::Spacer, None));
+    rows
+}
+
+/// Returns a popup's width: the devices popup fits its longest name, the actions popup its labels and shortcuts.
+fn popup_width(devices: &[Device], metrics: &Metrics, kind: PopupKind) -> i32 {
+    match kind {
+        PopupKind::Devices => menu_width(devices, metrics),
+        // Sized to its own content, as on Windows: the longest label in its hover weight, the gap, the
+        // wider shortcut and the right inset.
+        PopupKind::Actions => {
+            let longest = ["Settings", "Quit"].iter().map(|label| canvas::text_width(label, &metrics.strong)).max().unwrap_or(0);
+            let shortcut = ["⌘,", "⌘Q"].iter().map(|key| canvas::text_width(key, &metrics.body)).max().unwrap_or(0);
+            metrics.label_x + longest + metrics.name_gap + shortcut + metrics.right_inset
+        }
+    }
+}
+
+/// Creates the drawn view for each row, top first, all the same width.
+fn row_views(rows: Vec<(Retained<NSMenuItem>, MenuRow, Option<String>)>, width: i32, font_points: u32) -> Vec<(Retained<NSMenuItem>, Retained<MenuRowView>)> {
+    rows.into_iter()
+        .enumerate()
+        .map(|(index, (item, row, tooltip))| {
+            let view = MenuRowView::create(row, index, width, font_points);
+            if let Some(text) = tooltip {
+                view.setToolTip(Some(&NSString::from_str(&text)));
+            }
+            (item, view)
+        })
+        .collect()
+}
+
+/// Stacks row views top first inside a container, and returns its height. A flipped container counts
+/// down from its top, a normal one up from its bottom.
+fn stack(container: &NSView, views: &[Retained<MenuRowView>]) -> f64 {
+    let height: f64 = views.iter().map(|view| view.frame().size.height).sum();
+    let is_flipped = container.isFlipped();
+    let mut offset = 0.0;
+    for view in views {
+        let row_height = view.frame().size.height;
+        let y = if is_flipped { offset } else { height - offset - row_height };
+        view.setFrameOrigin(NSPoint::new(0.0, y));
+        container.addSubview(view);
+        offset += row_height;
+    }
+    height
+}
+
+/// Fills the menu: header, one row per device, a divider, then Settings and Quit with their shortcuts; or,
+/// for the battery card, just the header and device rows.
+/// As in NetSpeedGauge, every row is drawn inside ONE panel item: separate view items each get spacing
+/// from macOS, which left about 40 pt empty under Quit. Each row keeps a hidden item of its own, so its
+/// action, tag and shortcut (⌘, and ⌘Q) still work while the menu is open.
+pub fn show_menu(menu: &NSMenu, devices: &[Device], font_points: u32, kind: PopupKind) {
+    menu.removeAllItems();
+    let width = popup_width(devices, &Metrics::new(font_points), kind);
+    let rows = RefCell::new(Vec::<Retained<MenuRowView>>::new());
+    for (item, view) in row_views(row_list(devices, kind), width, font_points) {
+        item.setHidden(true);
+        item.setAllowsKeyEquivalentWhenHidden(true);
+        menu.addItem(&item);
+        rows.borrow_mut().push(view);
+    }
+    // The devices popup shows no Settings or Quit row, but ⌘, and ⌘Q still work while it is open.
+    if kind == PopupKind::Devices {
+        for item in [settings_item(), quit_item()] {
+            item.setHidden(true);
+            item.setAllowsKeyEquivalentWhenHidden(true);
+            menu.addItem(&item);
+        }
+    }
     let rows = rows.into_inner();
     let height: f64 = rows.iter().map(|view| view.frame().size.height).sum();
     let panel = MenuPanelView::create(width, height);
-    let mut top = height;
-    for view in &rows {
-        top -= view.frame().size.height;
-        view.setFrameOrigin(NSPoint::new(0.0, top));
-        panel.addSubview(view);
-    }
+    stack(&panel, &rows);
+    // macOS can make a menu wider than its content (a floor of its own, or a wide menu bar item). A
+    // width-sizable item view is stretched to the menu's width, and each row draws its right edge from
+    // its own width, so the drawn popup always fills the menu with no empty band.
+    panel.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+    rows.iter().for_each(|row| row.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable));
     let panel_item = NSMenuItem::new(main_thread());
     panel_item.setView(Some(&panel));
     menu.addItem(&panel_item);
 }
 
 /// Returns the drawn rows of a filled menu, top first.
-fn row_views(menu: &NSMenu) -> Vec<Retained<NSView>> {
+fn drawn_rows(menu: &NSMenu) -> Vec<Retained<NSView>> {
     let Some(panel) = menu.itemArray().iter().find_map(|item| item.view()) else {
         return Vec::new();
     };
@@ -525,10 +597,10 @@ pub fn on_report(tag: isize) {
 
 /// Paints the menu's rows, stacked as the menu shows them, to a PNG in a chosen look, for checks.
 /// `highlight` paints that row (counting from the header as 0) as selected.
-pub fn capture_menu_for_checks(devices: &[Device], font_points: u32, path: &str, is_dark: bool, highlight: Option<usize>) -> bool {
+pub fn capture_menu_for_checks(devices: &[Device], font_points: u32, kind: PopupKind, path: &str, is_dark: bool, highlight: Option<usize>) -> bool {
     let menu = NSMenu::new(main_thread());
-    show_menu(&menu, devices, font_points);
-    let views = row_views(&menu);
+    show_menu(&menu, devices, font_points, kind);
+    let views = drawn_rows(&menu);
     views.iter().for_each(|view| view.removeFromSuperview());
     let width = views.first().map_or(MENU_WIDTH as i32, |view| view.frame().size.width as i32);
     let height: f64 = views.iter().map(|view| view.frame().size.height).sum();
@@ -568,8 +640,11 @@ pub fn capture_open_menu(menu: &NSMenu, path: &str) -> bool {
         let in_window = panel.convertRect_toView(panel.bounds(), None);
         let window_height = window.frame().size.height;
         eprintln!(
-            "capture: panel {:.0} tall, {:.1} pt of menu above it, {:.1} pt below it",
+            "capture: panel {:.0} x {:.0} in a {:.0} wide window, empty band on the right {:.1}, {:.1} pt of menu above it, {:.1} pt below it",
+            in_window.size.width,
             in_window.size.height,
+            window.frame().size.width,
+            window.frame().size.width - (in_window.origin.x + in_window.size.width),
             window_height - (in_window.origin.y + in_window.size.height),
             in_window.origin.y
         );
@@ -580,4 +655,125 @@ pub fn capture_open_menu(menu: &NSMenu, path: &str) -> bool {
     let painted = frame.is_some_and(|view| crate::surface::capture_view(&view, path));
     PAINTS_BACKGROUND.with(|cell| cell.set(false));
     painted
+}
+
+// The hover card, as NetSpeedGauge's: a borderless panel under the menu bar item, shown without taking
+// the keyboard, closed when the pointer leaves the icon.
+const CARD_CORNER_RADIUS: f32 = 9.0;
+const WINDOW_LEVEL_POPUP: isize = 25;
+
+thread_local! {
+    static HOVER_CARD: RefCell<Option<Retained<NSWindow>>> = const { RefCell::new(None) };
+}
+
+define_class!(
+    // Paints the hover card's rounded surface and border; its rows draw on top.
+    #[unsafe(super = NSView)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "JuiceBarHoverCardView"]
+    pub struct HoverCardView;
+
+    impl HoverCardView {
+        #[unsafe(method(isFlipped))]
+        fn is_flipped(&self) -> bool {
+            true
+        }
+
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let theme = theme_for(&self.effectiveAppearance());
+            let size = self.frame().size;
+            let (width, height) = (size.width as i32, size.height as i32);
+            canvas::round_rect(0, 0, width, height, CARD_CORNER_RADIUS, theme.border);
+            canvas::round_rect(1, 1, width - 2, height - 2, CARD_CORNER_RADIUS - 1.0, theme.surface);
+        }
+
+        // The card only shows; the pointer never reaches it, and it must never take a click.
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> *mut NSView {
+            std::ptr::null_mut()
+        }
+    }
+);
+
+/// Builds the hover card's window with its rows, sized to them, without showing it.
+fn build_hover_card(devices: &[Device], font_points: u32) -> Retained<NSWindow> {
+    let width = popup_width(devices, &Metrics::new(font_points), PopupKind::Devices);
+    let views: Vec<Retained<MenuRowView>> = row_views(row_list(devices, PopupKind::Devices), width, font_points).into_iter().map(|(_, view)| view).collect();
+    let height: f64 = views.iter().map(|view| view.frame().size.height).sum();
+    let frame = NSRect::new(NSPoint::ZERO, NSSize::new(f64::from(width), height));
+    let this = HoverCardView::alloc(main_thread()).set_ivars(());
+    // SAFETY: initWithFrame: is NSView's designated initialiser.
+    let card: Retained<HoverCardView> = unsafe { msg_send![super(this), initWithFrame: frame] };
+    stack(&card, &views);
+    let style = objc2_app_kit::NSWindowStyleMask::Borderless | objc2_app_kit::NSWindowStyleMask::NonactivatingPanel;
+    let panel = objc2_app_kit::NSPanel::initWithContentRect_styleMask_backing_defer(objc2_app_kit::NSPanel::alloc(main_thread()), frame, style, objc2_app_kit::NSBackingStoreType::Buffered, false);
+    let window: Retained<NSWindow> = panel.into_super();
+    // SAFETY: the card's state keeps its own reference, so AppKit must not free the window on close.
+    unsafe { window.setReleasedWhenClosed(false) };
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&objc2_app_kit::NSColor::clearColor()));
+    window.setHasShadow(true);
+    window.setIgnoresMouseEvents(true);
+    window.setLevel(WINDOW_LEVEL_POPUP);
+    window.setContentView(Some(&card));
+    window
+}
+
+/// Shows the battery card under the menu bar item without taking the keyboard, replacing any open one.
+/// `frames` is the item's frame and its screen's usable area.
+pub fn show_hover_card(devices: &[Device], font_points: u32, frames: Option<(NSRect, NSRect)>) {
+    hide_hover_card();
+    let window = build_hover_card(devices, font_points);
+    // Flush with the menu bar under the icon, where the click popups open, so all three sit in one place.
+    if let Some((anchor, area)) = frames {
+        window.setFrameOrigin(menu_origin(window.frame().size, anchor, area));
+    }
+    window.orderFrontRegardless();
+    HOVER_CARD.with(|cell| *cell.borrow_mut() = Some(window));
+}
+
+/// Closes the hover card, if it is open.
+pub fn hide_hover_card() {
+    let open = HOVER_CARD.with(|cell| cell.borrow_mut().take());
+    if let Some(window) = open {
+        window.orderOut(None);
+    }
+}
+
+/// Returns true while the hover card is showing.
+pub fn is_hover_card_open() -> bool {
+    HOVER_CARD.with(|cell| cell.borrow().is_some())
+}
+
+/// Paints the open hover card to a PNG and logs its window against its drawn card, for capture mode.
+pub fn capture_hover_card(path: &str) -> bool {
+    let Some(window) = HOVER_CARD.with(|cell| cell.borrow().clone()) else {
+        eprintln!("capture: no hover card is open");
+        return false;
+    };
+    let frame = window.frame();
+    if let (Some(card), Some((anchor, area))) = (window.contentView(), crate::app::item_and_screen_frames()) {
+        eprintln!(
+            "capture: hover card window {:.0} x {:.0}, drawn card {:.0} x {:.0}, top {:.1} under the bar bottom {:.1}, right {:.1}, icon right {:.1}",
+            frame.size.width,
+            frame.size.height,
+            card.frame().size.width,
+            card.frame().size.height,
+            frame.origin.y + frame.size.height,
+            area.origin.y + area.size.height,
+            frame.origin.x + frame.size.width,
+            anchor.origin.x + anchor.size.width
+        );
+        return crate::surface::capture_view(&card, path);
+    }
+    false
+}
+
+/// Paints the battery card offscreen to a PNG in a chosen look, for checks.
+pub fn capture_card_for_checks(devices: &[Device], font_points: u32, path: &str, is_dark: bool) -> bool {
+    let window = build_hover_card(devices, font_points);
+    let theme = if is_dark { dark_theme() } else { light_theme() };
+    window.setAppearance(crate::theme::appearance_for(&theme).as_deref());
+    window.contentView().is_some_and(|card| crate::surface::capture_view(&card, path))
 }

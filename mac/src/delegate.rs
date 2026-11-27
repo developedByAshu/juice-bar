@@ -35,6 +35,11 @@ define_class!(
         fn menu_needs_update(&self, menu: &NSMenu) {
             app::on_menu_opening(menu);
         }
+
+        #[unsafe(method(menuDidClose:))]
+        fn menu_did_close(&self, _menu: &NSMenu) {
+            app::on_menu_closed();
+        }
     }
 
     unsafe impl NSWindowDelegate for AppDelegate {
@@ -45,6 +50,16 @@ define_class!(
     }
 
     impl AppDelegate {
+        #[unsafe(method(iconClicked:))]
+        fn icon_clicked(&self, _sender: Option<&AnyObject>) {
+            app::on_icon_clicked();
+        }
+
+        #[unsafe(method(hoverFired:))]
+        fn hover_fired(&self, _timer: &NSTimer) {
+            app::on_hover_fired();
+        }
+
         #[unsafe(method(poll:))]
         fn poll(&self, _timer: &NSTimer) {
             app::refresh();
@@ -152,4 +167,13 @@ pub fn watch_system_events() {
         let name = objc2_foundation::NSString::from_str("AppleInterfaceThemeChangedNotification");
         theme_center.addObserver_selector_name_object(target, sel!(themeChanged:), Some(&name), None);
     }
+}
+
+/// Returns true when the event being handled is a right click or a Control click, as NetSpeedGauge checks it.
+pub fn current_event_asks_for_menu() -> bool {
+    let event = objc2_app_kit::NSApplication::sharedApplication(main_thread()).currentEvent();
+    event.is_some_and(|event| {
+        matches!(event.r#type(), objc2_app_kit::NSEventType::RightMouseDown | objc2_app_kit::NSEventType::RightMouseUp)
+            || event.modifierFlags().contains(objc2_app_kit::NSEventModifierFlags::Control)
+    })
 }

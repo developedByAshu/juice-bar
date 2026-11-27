@@ -13,7 +13,7 @@ use crate::theme::{apply_title_bar, current_theme, dark_theme, draw_made_with_lo
 use crate::{app, startup};
 use juicebar_shared::device::{Connection, Device, DeviceKind};
 use juicebar_shared::names::short_name;
-use juicebar_shared::settings::{Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
+use juicebar_shared::settings::{HoverAction, Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
@@ -65,13 +65,23 @@ const ICON_LOCK: &str = "lock.fill";
 const ICON_RESET: &str = "arrow.counterclockwise";
 
 /// The pages in the sidebar, with their icon and title.
-const PAGES: [(&str, &str); 4] = [("gearshape", "General"), ("computermouse", "Devices"), ("arrow.counterclockwise", "Reset"), ("info.circle", "Details")];
-const DEVICES_PAGE: usize = 1;
-const RESET_PAGE: usize = 2;
+// The same split, icons and order as NetSpeedGauge's sidebar and Juice Bar's Windows settings.
+const PAGES: [(&str, &str); 5] = [
+    ("gearshape", "General"),
+    ("paintbrush", "Appearance"),
+    ("computermouse", "Devices"),
+    ("slider.horizontal.3", "Advanced"),
+    ("info.circle", "About"),
+];
+const APPEARANCE_PAGE: usize = 1;
+const DEVICES_PAGE: usize = 2;
+const ADVANCED_PAGE: usize = 3;
 
 /// The check intervals offered, in minutes, with their labels.
-const POLL_CHOICES: [u32; 6] = [1, 2, 5, 10, 15, 30];
-const POLL_LABELS: [&str; 6] = ["1 m", "2 m", "5 m", "10 m", "15 m", "30 m"];
+const MIN_POLL_MINUTES: u32 = 1;
+const MAX_POLL_MINUTES: u32 = 60;
+const HOVER_OPTIONS: [&str; 2] = ["Nothing", "Battery card"];
+const CLICK_OPTIONS: [&str; 2] = ["Devices", "Settings"];
 
 /// What Juice Bar does and does not do with data, shown on the Details page.
 const PRIVACY_LINES: [&str; 4] = [
@@ -96,6 +106,8 @@ enum Row {
     ShowPercent,
     MenuTextSize,
     PollInterval,
+    OnHover,
+    OnClick,
     DeviceList,
     ResetAll,
     AboutCard,
@@ -103,20 +115,22 @@ enum Row {
     Developer,
 }
 
-const GENERAL_ROWS: &[Row] = &[Row::Section("Startup"), Row::LaunchAtLogin, Row::Section("Menu bar"), Row::ShowPercent, Row::MenuTextSize, Row::Section("Checks"), Row::PollInterval];
+const GENERAL_ROWS: &[Row] = &[Row::Section("Startup"), Row::LaunchAtLogin, Row::Section("Battery checks"), Row::PollInterval];
+const APPEARANCE_ROWS: &[Row] = &[Row::Section("Menu bar icon"), Row::ShowPercent, Row::Section("Menu"), Row::MenuTextSize];
 const DEVICES_ROWS: &[Row] = &[
     Row::Section("Your devices"),
     Row::Note("Type a name to change how a device shows in the menu.\nSwitch a device off to leave it out of the menu and the icon."),
     Row::DeviceList,
 ];
-const RESET_ROWS: &[Row] = &[Row::Section("Reset"), Row::ResetAll];
+const ADVANCED_ROWS: &[Row] = &[Row::Section("Behaviour"), Row::OnHover, Row::OnClick, Row::Section("Reset"), Row::ResetAll];
 const ABOUT_ROWS: &[Row] = &[Row::AboutCard, Row::Section("Privacy"), Row::Privacy, Row::Section("Know your developer"), Row::Developer];
 
 fn page_rows(page: usize) -> &'static [Row] {
     match page {
         0 => GENERAL_ROWS,
+        APPEARANCE_PAGE => APPEARANCE_ROWS,
         DEVICES_PAGE => DEVICES_ROWS,
-        RESET_PAGE => RESET_ROWS,
+        ADVANCED_PAGE => ADVANCED_ROWS,
         _ => ABOUT_ROWS,
     }
 }
@@ -129,6 +143,8 @@ enum Action {
     TogglePercent,
     SetPoll(u32),
     SetMenuFont(u32),
+    SetHover(u8),
+    SetClick(u8),
     ToggleShown(usize),
     AskReset,
     CancelReset,
@@ -262,7 +278,7 @@ impl SettingsWindow {
         match row {
             Row::Section(_) => SECTION_GAP + 8,
             Row::Note(_) => NOTE_HEIGHT,
-            Row::LaunchAtLogin | Row::ShowPercent | Row::MenuTextSize | Row::PollInterval | Row::ResetAll => ROW_HEIGHT + ROW_GAP,
+            Row::LaunchAtLogin | Row::ShowPercent | Row::MenuTextSize | Row::PollInterval | Row::OnHover | Row::OnClick | Row::ResetAll => ROW_HEIGHT + ROW_GAP,
             Row::DeviceList => self.devices.len().max(1) as i32 * (ROW_HEIGHT + ROW_GAP),
             Row::AboutCard => ABOUT_CARD_HEIGHT + ROW_GAP,
             Row::Privacy => privacy_height() + ROW_GAP,
@@ -394,21 +410,35 @@ impl SettingsWindow {
             }
             Row::LaunchAtLogin => {
                 let is_on = startup::is_enabled();
-                self.draw_toggle_row(left, y, width, ("Start at login", "Opens Juice Bar when you log in"), is_on, Action::ToggleLaunchAtLogin);
+                self.draw_toggle_row(left, y, width, ("Open at login", "Opens Juice Bar when you log in"), is_on, Action::ToggleLaunchAtLogin);
             }
             Row::ShowPercent => {
                 let is_on = self.settings.shows_percent_in_icon;
-                self.draw_toggle_row(left, y, width, ("Show the lowest %", "Next to the glass in the menu bar"), is_on, Action::TogglePercent);
+                self.draw_toggle_row(left, y, width, ("Show the lowest % in the icon", "Shows the number next to the juice glass"), is_on, Action::TogglePercent);
             }
             Row::MenuTextSize => {
                 self.row_card(left, y, width, ROW_HEIGHT);
-                self.row_label(left, y, "Menu text size", "");
-                self.draw_stepper(left + width - 14, y, self.settings.menu_font_points);
+                self.row_label(left, y, "Menu text size", "The menu and battery card scale with it");
+                let points = self.settings.menu_font_points;
+                self.draw_stepper(left + width - 14, y, (points, " pt"), (MENU_FONT_POINTS_MIN, MENU_FONT_POINTS_MAX), Action::SetMenuFont);
             }
             Row::PollInterval => {
                 self.row_card(left, y, width, ROW_HEIGHT);
-                self.row_label(left, y, "Check batteries every", "");
-                self.draw_poll_segments(left + width - 14, y);
+                self.row_label(left, y, "Check batteries every", "Juice Bar sleeps in between, so it costs no power");
+                let minutes = self.settings.poll_minutes;
+                self.draw_stepper(left + width - 14, y, (minutes, " min"), (MIN_POLL_MINUTES, MAX_POLL_MINUTES), Action::SetPoll);
+            }
+            Row::OnHover => {
+                self.row_card(left, y, width, ROW_HEIGHT);
+                self.row_label(left, y, "On hover", "When the pointer rests on the icon");
+                let chosen = self.settings.hover_action.number();
+                self.draw_segments(left + width - 14, y, &HOVER_OPTIONS, chosen, Action::SetHover);
+            }
+            Row::OnClick => {
+                self.row_card(left, y, width, ROW_HEIGHT);
+                self.row_label(left, y, "On click", "Right-click opens Settings and Quit");
+                let chosen = u8::from(app::is_click_settings(&self.settings));
+                self.draw_segments(left + width - 14, y, &CLICK_OPTIONS, chosen, Action::SetClick);
             }
             Row::DeviceList => self.draw_device_list(left, y, width),
             Row::ResetAll => self.draw_reset_row(left, y, width),
@@ -454,19 +484,20 @@ impl SettingsWindow {
         canvas::round_rect(knob_x, top + (height - knob) / 2, knob, knob, knob as f32 / 2.0, knob_color);
     }
 
-    fn draw_poll_segments(&mut self, right: i32, y: i32) {
+    /// Draws a segmented choice ending at `right`, as NetSpeedGauge's: the chosen option on a raised pill.
+    fn draw_segments(&mut self, right: i32, y: i32, options: &[&str], chosen: u8, action_for: fn(u8) -> Action) {
         let theme = self.theme;
-        let widths: Vec<i32> = POLL_LABELS.iter().map(|option| canvas::text_width(option, &self.fonts.strong) + SEGMENT_PADDING * 2).collect();
+        let widths: Vec<i32> = options.iter().map(|option| canvas::text_width(option, &self.fonts.strong) + SEGMENT_PADDING * 2).collect();
         let total: i32 = widths.iter().sum();
         let (height, top) = (32, y + 9);
         let mut x = right - total;
         let radius = CARD_RADIUS as f32;
         canvas::round_rect(x, top, total, height, radius, theme.segment_track_on_card);
         let inset = 3;
-        for (position, option) in POLL_LABELS.iter().enumerate() {
+        for (position, option) in options.iter().enumerate() {
             let segment = widths[position];
-            let action = Action::SetPoll(POLL_CHOICES[position]);
-            let is_selected = self.settings.poll_minutes == POLL_CHOICES[position];
+            let action = action_for(position as u8);
+            let is_selected = usize::from(chosen) == position;
             if is_selected {
                 canvas::round_rect(x + inset, top + inset, segment - inset * 2, height - inset * 2, radius - inset as f32 / 2.0, theme.segment_selected);
             }
@@ -480,15 +511,15 @@ impl SettingsWindow {
 
     /// Draws a minus and plus pair around the value, as NetSpeedGauge's size stepper. At either end of its
     /// range a button looks switched off and cannot be clicked.
-    fn draw_stepper(&mut self, right: i32, y: i32, value: u32) {
+    fn draw_stepper(&mut self, right: i32, y: i32, (value, suffix): (u32, &str), (min, max): (u32, u32), action_for: fn(u32) -> Action) {
         let theme = self.theme;
         let (size, top) = (30, y + 10);
         let value_width = 76;
         let plus_x = right - size;
         let minus_x = plus_x - value_width - size;
-        let buttons = [(minus_x, ICON_MINUS, value.saturating_sub(1), value > MENU_FONT_POINTS_MIN), (plus_x, ICON_PLUS, value + 1, value < MENU_FONT_POINTS_MAX)];
+        let buttons = [(minus_x, ICON_MINUS, value.saturating_sub(1), value > min), (plus_x, ICON_PLUS, value + 1, value < max)];
         for (x, icon, new_value, is_enabled) in buttons {
-            let action = Action::SetMenuFont(new_value);
+            let action = action_for(new_value);
             let radius = CARD_RADIUS as f32;
             if is_enabled {
                 let fill = if self.is_hover(action) { theme.button_hover } else { theme.button };
@@ -500,7 +531,7 @@ impl SettingsWindow {
                 canvas::symbol(x + size / 2, top + size / 2, icon, 8.0, mix(theme.card, theme.muted, DISABLED_TEXT));
             }
         }
-        canvas::text(minus_x + size + value_width / 2, top + 5, &format!("{value} pt"), &self.fonts.body, theme.text, Align::Center);
+        canvas::text(minus_x + size + value_width / 2, top + 5, &format!("{value}{suffix}"), &self.fonts.body, theme.text, Align::Center);
     }
 
     /// Draws one row per device: its full name and details, a rename box, and a Show toggle.
@@ -541,11 +572,11 @@ impl SettingsWindow {
         let theme = self.theme;
         self.row_card(left, y, width, ROW_HEIGHT);
         if self.is_reset_done {
-            canvas::text(left + 14, y + 7, "Reset all settings", &self.fonts.body, theme.text, Align::Left);
+            canvas::text(left + 14, y + 7, "Every setting", &self.fonts.body, theme.text, Align::Left);
             canvas::symbol(left + 20, y + 27 + self.fonts.small.box_height / 2, ICON_DONE, 8.0, theme.good);
             canvas::text(left + 30, y + 27, "Done. Every setting is back to its default.", &self.fonts.small, theme.good, Align::Left);
         } else {
-            self.row_label(left, y, "Reset all settings", "Names, hidden devices, the interval and the %");
+            self.row_label(left, y, "Every setting", "Renames, hidden devices and the check interval");
         }
         let fill = if self.is_hover(Action::AskReset) { theme.button_hover } else { theme.button };
         self.draw_button(left + width - 14, y + (ROW_HEIGHT - BUTTON_HEIGHT) / 2, "Reset all", (fill, theme.text), Action::AskReset);
@@ -626,7 +657,15 @@ impl SettingsWindow {
                 effects.apply = Some(self.settings.clone());
             }
             Action::SetPoll(minutes) => {
-                self.settings.poll_minutes = minutes;
+                self.settings.poll_minutes = minutes.clamp(MIN_POLL_MINUTES, MAX_POLL_MINUTES);
+                effects.apply = Some(self.settings.clone());
+            }
+            Action::SetHover(choice) => {
+                self.settings.hover_action = HoverAction::from_number(choice);
+                effects.apply = Some(self.settings.clone());
+            }
+            Action::SetClick(choice) => {
+                self.settings.click_action = app::click_choice(choice == 1);
                 effects.apply = Some(self.settings.clone());
             }
             Action::ToggleShown(index) => {
@@ -1062,7 +1101,7 @@ pub fn preview_theme(is_dark: bool) {
     }
 }
 
-/// Clicks an area as a user would, for checks: "page:N", "percent", "poll:N", "menu_font:N", "show:N", "ask_reset", "cancel_reset", "confirm_reset".
+/// Clicks an area as a user would, for checks: "page:N", "percent", "poll:N", "menu_font:N", "hover:N", "click:N", "show:N", "ask_reset", "cancel_reset", "confirm_reset".
 /// Returns false when no such area is showing.
 pub fn click_for_checks(name: &str) -> bool {
     let (kind, number) = name.split_once(':').map_or((name, 0), |(kind, number)| (kind, number.parse().unwrap_or(0)));
@@ -1071,6 +1110,8 @@ pub fn click_for_checks(name: &str) -> bool {
         "percent" => Action::TogglePercent,
         "poll" => Action::SetPoll(number as u32),
         "menu_font" => Action::SetMenuFont(number as u32),
+        "hover" => Action::SetHover(number as u8),
+        "click" => Action::SetClick(number as u8),
         "show" => Action::ToggleShown(number),
         "ask_reset" => Action::AskReset,
         "cancel_reset" => Action::CancelReset,

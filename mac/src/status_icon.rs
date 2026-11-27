@@ -2,14 +2,15 @@
 //! lowest device's level in its tone. Plain tone draws as a template image, so it follows the menu
 //! bar's light, dark and tinted looks for free.
 
-use crate::delegate::main_thread;
+use crate::delegate::{delegate, main_thread};
 use crate::theme::tone_color;
 use block2::RcBlock;
 use juicebar_shared::glyph::{juice_polygon, BOX, GLASS, LINE_WIDTH, STRAW};
 use juicebar_shared::tone::Tone;
 use objc2::rc::Retained;
-use objc2::runtime::Bool;
-use objc2_app_kit::{NSBezierPath, NSColor, NSImage, NSLineCapStyle, NSLineJoinStyle, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
+use objc2::runtime::{AnyObject, Bool};
+use objc2::{define_class, msg_send, sel, AnyThread, MainThreadOnly};
+use objc2_app_kit::{NSAutoresizingMaskOptions, NSEvent, NSEventMask, NSTrackingArea, NSTrackingAreaOptions, NSView, NSBezierPath, NSColor, NSImage, NSLineCapStyle, NSLineJoinStyle, NSStatusBar, NSStatusItem, NSVariableStatusItemLength};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
 
 /// Point size of the menu bar image; the glyph box is scaled to fit.
@@ -20,6 +21,58 @@ pub fn create_status_icon() -> Retained<NSStatusItem> {
     let item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     update_status_icon(&item, Tone::Plain, None, false);
     item
+}
+
+define_class!(
+    // Lies over the button and watches the pointer for the hover card. It takes no clicks, so the button
+    // keeps every click, as NetSpeedGauge's readout view does.
+    #[unsafe(super = NSView)]
+    #[thread_kind = MainThreadOnly]
+    #[name = "JuiceBarIconHoverView"]
+    pub struct IconHoverView;
+
+    impl IconHoverView {
+        #[unsafe(method(hitTest:))]
+        fn hit_test(&self, _point: NSPoint) -> *mut NSView {
+            std::ptr::null_mut()
+        }
+
+        #[unsafe(method(mouseEntered:))]
+        fn mouse_entered(&self, _event: &NSEvent) {
+            crate::app::on_icon_enter();
+        }
+
+        #[unsafe(method(mouseExited:))]
+        fn mouse_exited(&self, _event: &NSEvent) {
+            crate::app::on_icon_exit();
+        }
+    }
+);
+
+/// Sends the button's clicks (left and right) to the delegate while no menu is attached, and watches the
+/// pointer resting on the icon for the hover card.
+pub fn watch_clicks_and_hover(item: &NSStatusItem) {
+    let Some(button) = item.button(main_thread()) else {
+        return;
+    };
+    let target = delegate();
+    let target: &AnyObject = target.as_ref();
+    // SAFETY: the delegate lives for the whole app and answers iconClicked:.
+    unsafe {
+        button.setTarget(Some(target));
+        button.setAction(Some(sel!(iconClicked:)));
+    }
+    button.sendActionOn(NSEventMask::LeftMouseUp | NSEventMask::RightMouseUp);
+    let this = IconHoverView::alloc(main_thread()).set_ivars(());
+    // SAFETY: initWithFrame: is NSView's designated initialiser.
+    let view: Retained<IconHoverView> = unsafe { msg_send![super(this), initWithFrame: button.bounds()] };
+    view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable | NSAutoresizingMaskOptions::ViewHeightSizable);
+    let options = NSTrackingAreaOptions::MouseEnteredAndExited | NSTrackingAreaOptions::ActiveAlways | NSTrackingAreaOptions::InVisibleRect;
+    let owner: &AnyObject = view.as_ref();
+    // SAFETY: the view owns the area, and AppKit keeps its owner reference only while the area is attached.
+    let area = unsafe { NSTrackingArea::initWithRect_options_owner_userInfo(NSTrackingArea::alloc(), NSRect::ZERO, options, Some(owner), None) };
+    view.addTrackingArea(&area);
+    button.addSubview(&view);
 }
 
 /// Redraws the glass for the lowest level, and shows that % next to it when asked.

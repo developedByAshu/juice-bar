@@ -3,12 +3,13 @@
 
 use crate::bluetooth::{bluetooth_devices, read_bluetooth_entries, remembered_bluetooth_names, BluetoothEntry};
 use crate::delegate::{delegate, main_thread, start_timer, watch_system_events};
-use crate::{menu_ui, status_icon};
+use crate::menu_ui::{self, PopupKind};
+use crate::status_icon;
 use juicebar_shared::demo::{is_demo_mode, sample_devices};
 use juicebar_shared::device::Device;
 use juicebar_shared::report::report_url;
 use juicebar_shared::scan::{build_device, probe_usb_device, scan_dongles, ScannedDevice, UsbDevice};
-use juicebar_shared::settings::Settings;
+use juicebar_shared::settings::{ClickAction, HoverAction, Settings};
 use juicebar_shared::tone::{icon_tone, lowest_percent};
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -32,6 +33,10 @@ struct App {
     shown: Vec<Device>,
     poll_timer: Option<Retained<NSTimer>>,
     is_scanning: bool,
+    /// The popup the menu shows while it is open; None while it is closed.
+    open_popup: Option<PopupKind>,
+    /// Waits to see whether the pointer rests on the icon.
+    hover_timer: Option<Retained<NSTimer>>,
     /// When each device (by row id) last gave a battery reading, so one missed read keeps its %.
     last_read: std::collections::HashMap<String, std::time::Instant>,
     /// Keyboards whose dongle said they fell asleep; these show as asleep at once, without the grace.
@@ -61,26 +66,133 @@ pub fn finish_startup() {
     let status_item = status_icon::create_status_icon();
     let menu = NSMenu::new(main_thread());
     menu.setDelegate(Some(ProtocolObject::from_ref(&*delegate())));
-    status_item.setMenu(Some(&menu));
+    status_icon::watch_clicks_and_hover(&status_item);
     let settings = Settings::load();
     let poll_timer = Some(start_timer(f64::from(settings.poll_minutes) * 60.0, sel!(poll:), true));
     APP.with(|cell| {
-        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false, last_read: std::collections::HashMap::new(), asleep: Vec::new() });
+        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false, open_popup: None, hover_timer: None, last_read: std::collections::HashMap::new(), asleep: Vec::new() });
     });
+    with_app(sync_item_menu);
     watch_system_events();
     refresh();
     start_capture_if_asked();
 }
 
-/// Capture mode for screenshots without touching the mouse: JUICEBAR_CAPTURE=menu or settings
-/// opens that view after the first scan and quits a few seconds later. JUICEBAR_CAPTURE_PAGE picks the
-/// settings page (general, devices, reset, details). JUICEBAR_CAPTURE=reset walks a real reset with a
+const HOVER_DELAY_SECONDS: f64 = 0.45;
+
+/// Checks whether a left click opens Settings rather than the devices popup. The only place that names a
+/// click choice, so the shared enum's names can change here alone.
+fn click_opens_settings(settings: &Settings) -> bool {
+    settings.click_action == ClickAction::Settings
+}
+
+/// Returns the click choice for the settings window's "On click" segments: Devices or Settings.
+pub fn click_choice(opens_settings: bool) -> ClickAction {
+    if opens_settings {
+        ClickAction::Settings
+    } else {
+        ClickAction::Devices
+    }
+}
+
+/// Returns true when the settings choose Settings for a left click, for the settings window.
+pub fn is_click_settings(settings: &Settings) -> bool {
+    click_opens_settings(settings)
+}
+
+/// Keeps the menu on the item while a left click shows the devices popup, as NetSpeedGauge keeps its
+/// own menu on while a click shows its card. A click that opens Settings comes to the button instead,
+/// and a right click then opens the menu itself.
+fn sync_item_menu(app: &mut App) {
+    let menu = (!click_opens_settings(&app.settings)).then(|| app.menu.clone());
+    app.status_item.setMenu(menu.as_deref());
+}
+
+/// Returns the item's frame and its screen's usable area.
+fn frames_of(item: &NSStatusItem) -> Option<(objc2_foundation::NSRect, objc2_foundation::NSRect)> {
+    let window = item.button(main_thread()).and_then(|button| button.window())?;
+    let area = window.screen()?.visibleFrame();
+    Some((window.frame(), area))
+}
+
+fn cancel_hover(app: &mut App) {
+    if let Some(timer) = app.hover_timer.take() {
+        timer.invalidate();
+    }
+}
+
+/// Starts waiting to see whether the pointer rests on the icon, when hovering shows the battery card.
+pub fn on_icon_enter() {
+    with_app(|app| {
+        cancel_hover(app);
+        if app.settings.hover_action == HoverAction::Card && app.open_popup.is_none() {
+            app.hover_timer = Some(start_timer(HOVER_DELAY_SECONDS, sel!(hoverFired:), false));
+        }
+    });
+}
+
+/// Closes what hovering opened when the pointer leaves.
+pub fn on_icon_exit() {
+    with_app(cancel_hover);
+    menu_ui::hide_hover_card();
+}
+
+/// Shows the battery card without taking the keyboard. It closes again when the pointer leaves.
+pub fn on_hover_fired() {
+    let wanted = with_app(|app| {
+        app.hover_timer = None;
+        (app.open_popup.is_none()).then(|| (app.shown.clone(), app.settings.menu_font_points, frames_of(&app.status_item)))
+    })
+    .flatten();
+    if let Some((shown, points, frames)) = wanted {
+        menu_ui::show_hover_card(&shown, points, frames);
+    }
+}
+
+/// Handles a click that came to the button because no menu is attached: Settings on a left click, the
+/// actions popup on a right or Control click.
+pub fn on_icon_clicked() {
+    with_app(cancel_hover);
+    menu_ui::hide_hover_card();
+    if crate::delegate::current_event_asks_for_menu() {
+        open_item_menu();
+    } else {
+        crate::settings_ui::open_settings();
+    }
+}
+
+/// Opens the menu from the item for a right click when a left click does something else, as NetSpeedGauge does.
+pub fn open_item_menu() {
+    let Some((item, menu)) = with_app(|app| (app.status_item.clone(), app.menu.clone())) else {
+        return;
+    };
+    let Some(button) = item.button(main_thread()) else {
+        return;
+    };
+    item.setMenu(Some(&menu));
+    // SAFETY: a nil sender is allowed, and the button stays alive through the call.
+    unsafe { button.performClick(None) };
+    item.setMenu(None);
+}
+
+/// Forgets which popup was open once the menu closes.
+pub fn on_menu_closed() {
+    with_app(|app| app.open_popup = None);
+}
+
+/// Capture mode for screenshots without touching the mouse: JUICEBAR_CAPTURE=menu (the devices popup),
+/// actions (Settings and Quit), hover (the battery card) or settings opens that view after the first scan and quits a few seconds later. JUICEBAR_CAPTURE_PAGE picks the
+/// settings page (general, appearance, devices, advanced, about). JUICEBAR_CAPTURE=reset walks a real reset with a
 /// rename being typed, writes JUICEBAR_CAPTURE_PATH after it, then closes the window mid edit.
 fn start_capture_if_asked() {
     match std::env::var("JUICEBAR_CAPTURE").as_deref() {
-        Ok("menu") => {
+        Ok(CAPTURE_DEVICES | CAPTURE_ACTIONS) => {
             start_timer(3.0, sel!(captureOpenMenu:), false);
             start_timer(9.0, sel!(captureFinish:), false);
+        }
+        Ok(CAPTURE_HOVER) => {
+            start_timer(3.0, sel!(hoverFired:), false);
+            start_timer(5.0, sel!(captureFinish:), false);
         }
         Ok("settings") => {
             crate::settings_ui::open_settings();
@@ -100,8 +212,17 @@ fn start_capture_if_asked() {
     }
 }
 
+// Capture mode names: the devices popup a left click opens, Settings and Quit from a right click, and the hover card.
+const CAPTURE_DEVICES: &str = "menu";
+const CAPTURE_ACTIONS: &str = "actions";
+const CAPTURE_HOVER: &str = "hover";
+
+fn capture_wants(mode: &str) -> bool {
+    std::env::var("JUICEBAR_CAPTURE").as_deref() == Ok(mode)
+}
+
 /// The settings pages capture mode can open, in sidebar order.
-const CAPTURE_PAGES: [&str; 4] = ["general", "devices", "reset", "details"];
+const CAPTURE_PAGES: [&str; 5] = ["general", "appearance", "devices", "advanced", "about"];
 
 fn log_renames(step: &str) {
     let renames = with_app(|app| app.settings.renames.clone()).unwrap_or_default();
@@ -111,9 +232,9 @@ fn log_renames(step: &str) {
 /// Types a rename, leaves the page mid edit, then resets everything through the confirm card. Used only by capture mode.
 pub fn capture_reset() {
     use crate::settings_ui::{click_for_checks, is_reset_done_for_checks, show_page_for_checks, type_rename_for_checks};
-    show_page_for_checks(1);
+    show_page_for_checks(2);
     eprintln!("capture: typed a rename: {}", type_rename_for_checks(0, "Desk keyboard"));
-    eprintln!("capture: opened Reset while typing: {}", click_for_checks("page:2"));
+    eprintln!("capture: opened Advanced while typing: {}", click_for_checks("page:3"));
     log_renames("after leaving the rename");
     eprintln!("capture: asked to reset: {}", click_for_checks("ask_reset"));
     if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_CONFIRM_PATH") {
@@ -129,7 +250,7 @@ pub fn capture_reset() {
 
 /// Types a rename and closes the window with Escape before it is finished. Used only by capture mode.
 pub fn capture_close_while_editing() {
-    crate::settings_ui::show_page_for_checks(1);
+    crate::settings_ui::show_page_for_checks(2);
     eprintln!("capture: typed a rename: {}", crate::settings_ui::type_rename_for_checks(1, "Travel mouse"));
     crate::settings_ui::press_escape_for_checks();
     log_renames("after closing mid edit");
@@ -150,9 +271,10 @@ pub fn capture_finish() {
         eprintln!("capture: still running after the reset, quitting");
     } else if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_PATH") {
         let menu = with_app(|app| app.menu.clone());
-        let is_menu = std::env::var("JUICEBAR_CAPTURE").as_deref() == Ok("menu");
+        let is_menu = capture_wants(CAPTURE_DEVICES) || capture_wants(CAPTURE_ACTIONS);
         let saved = match menu {
             Some(menu) if is_menu => menu_ui::capture_open_menu(&menu, &path),
+            _ if capture_wants(CAPTURE_HOVER) => menu_ui::capture_hover_card(&path),
             _ => crate::settings_ui::capture_to(&path),
         };
         eprintln!("capture: saved {path}: {saved}");
@@ -180,7 +302,10 @@ fn rebuild(app: &mut App) {
     // Settings lists every device; the icon and menu leave out the hidden ones.
     let shown: Vec<Device> = app.devices.iter().filter(|device| !app.settings.hidden.contains(&device.id)).cloned().collect();
     status_icon::update_status_icon(&app.status_item, icon_tone(&shown), lowest_percent(&shown), app.settings.shows_percent_in_icon);
-    menu_ui::show_menu(&app.menu, &shown, app.settings.menu_font_points);
+    menu_ui::show_menu(&app.menu, &shown, app.settings.menu_font_points, app.open_popup.unwrap_or(PopupKind::Devices));
+    if menu_ui::is_hover_card_open() {
+        menu_ui::show_hover_card(&shown, app.settings.menu_font_points, frames_of(&app.status_item));
+    }
     app.shown = shown;
     crate::settings_ui::on_devices_changed(&app.settings, &app.found);
 }
@@ -384,9 +509,17 @@ pub fn refresh() {
     send_hid_job(HidJob::Scan(settings));
 }
 
-/// Shows the last known rows at once and asks for fresh ones; an open menu updates in place.
+/// Picks the popup for this opening, shows the last known rows at once and asks for fresh ones; an open
+/// popup updates in place. A right or Control click opens Settings and Quit; a left click the devices.
 pub fn on_menu_opening(_menu: &NSMenu) {
-    with_app(rebuild);
+    let wants_actions = crate::delegate::current_event_asks_for_menu() || capture_wants(CAPTURE_ACTIONS);
+    let kind = if wants_actions { PopupKind::Actions } else { PopupKind::Devices };
+    menu_ui::hide_hover_card();
+    with_app(|app| {
+        cancel_hover(app);
+        app.open_popup = Some(kind);
+        rebuild(app);
+    });
     refresh();
 }
 
@@ -421,9 +554,7 @@ pub fn report_url_for(tag: isize) -> Option<String> {
 
 /// Returns the menu bar item's frame and the usable area of its screen, which the menu is placed against.
 pub fn item_and_screen_frames() -> Option<(objc2_foundation::NSRect, objc2_foundation::NSRect)> {
-    let window = with_app(|app| app.status_item.button(main_thread()).and_then(|button| button.window())).flatten()?;
-    let area = window.screen()?.visibleFrame();
-    Some((window.frame(), area))
+    with_app(|app| frames_of(&app.status_item)).flatten()
 }
 
 /// Returns a copy of the settings and every device under its own name, for the settings window.
@@ -438,6 +569,7 @@ pub fn apply_settings(settings: Settings) -> bool {
         let interval_changed = settings.poll_minutes != app.settings.poll_minutes;
         settings.save();
         app.settings = settings;
+        sync_item_menu(app);
         if interval_changed {
             if let Some(timer) = app.poll_timer.take() {
                 timer.invalidate();
