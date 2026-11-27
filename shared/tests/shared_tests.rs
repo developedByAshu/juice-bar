@@ -171,9 +171,10 @@ fn report_url_carries_ids_and_no_personal_data() {
 #[test]
 fn hover_and_click_choices_survive_a_save_and_default_to_todays_behaviour() {
     let fresh = Settings::from_text("");
-    assert_eq!((fresh.hover_action, fresh.click_action), (HoverAction::Nothing, ClickAction::Menu));
+    assert_eq!((fresh.hover_action, fresh.click_action), (HoverAction::Nothing, ClickAction::Devices));
     let chosen = Settings { hover_action: HoverAction::Card, click_action: ClickAction::Settings, ..Settings::default() };
     let loaded = Settings::from_text(&chosen.to_text());
     assert_eq!((loaded.hover_action, loaded.click_action), (HoverAction::Card, ClickAction::Settings));
-    assert_eq!(Settings::from_text("click_action=9").click_action, ClickAction::Menu, "an unknown number falls back");
+    assert_eq!(Settings::from_text("click_action=9").click_action, ClickAction::Devices, "an unknown number falls back");
+    assert_eq!(Settings::from_text("click_action=1").click_action, ClickAction::Devices, "the old card loads as Devices");
 }

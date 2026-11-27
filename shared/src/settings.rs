@@ -21,12 +21,13 @@ pub enum HoverAction {
     Card,
 }
 
-/// What a left click on the icon does, as NetSpeedGauge's "On click". A right click always opens the menu.
+/// What a left click on the icon does, as NetSpeedGauge's "On click". A right click always opens
+/// Settings and Quit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ClickAction {
+    /// The connected devices: the header and one row per device.
     #[default]
-    Menu,
-    Card,
+    Devices,
     Settings,
 }
 
@@ -41,16 +42,17 @@ impl HoverAction {
 }
 
 impl ClickAction {
+    /// Settings is stored as 2, its number before the menu and card became one devices flyout; the old
+    /// 0 (menu) and 1 (card) both load as Devices.
     pub fn from_number(number: u8) -> Self {
-        match number {
-            1 => Self::Card,
-            2 => Self::Settings,
-            _ => Self::Menu,
-        }
+        if number == 2 { Self::Settings } else { Self::Devices }
     }
 
     pub fn number(self) -> u8 {
-        self as u8
+        match self {
+            Self::Devices => 0,
+            Self::Settings => 2,
+        }
     }
 }
 
@@ -81,7 +83,7 @@ impl Default for Settings {
             shows_percent_in_icon: false,
             menu_font_points: MENU_FONT_POINTS_DEFAULT,
             hover_action: HoverAction::Nothing,
-            click_action: ClickAction::Menu,
+            click_action: ClickAction::Devices,
             renames: BTreeMap::new(),
             hidden: Vec::new(),
             confirmed_bluetooth_names: BTreeMap::new(),
