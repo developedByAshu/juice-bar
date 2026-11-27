@@ -11,7 +11,7 @@ use crate::tray_pin;
 use crate::theme::{apply_window_look, current_theme, draw_made_with_love, on_theme_change, tone_color, Backdrop, Theme, GREEN, ICON_FONT, UI_FONT, UI_FONT_STRONG};
 use crate::util::{scale, to_wide};
 use juicebar_shared::device::{Device, NameSource};
-use juicebar_shared::settings::{Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
+use juicebar_shared::settings::{ClickAction, HoverAction, Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
 use juicebar_shared::tone::tone_for_percent;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -104,9 +104,13 @@ enum Control {
     MenuTextMore,
     PercentToggle,
     PinToggle,
+    /// One option of a segmented choice: the row and the option's number.
+    Choice(Setting, u8),
     StartupToggle,
     Reset,
     Rename(usize),
+    RenameSave(usize),
+    RenameCancel(usize),
     ShowToggle(usize),
     ConfirmName(usize),
 }
@@ -118,6 +122,8 @@ enum Setting {
     MenuText,
     Percent,
     TaskbarPin,
+    Hover,
+    Click,
     Startup,
     Reset,
 }
@@ -223,6 +229,9 @@ fn page_blocks(state: &Window) -> Vec<Block> {
             Block::Setting(Setting::Percent),
             Block::Setting(Setting::TaskbarPin),
             Block::Setting(Setting::MenuText),
+            Block::Section("Behaviour"),
+            Block::Setting(Setting::Hover),
+            Block::Setting(Setting::Click),
             Block::Section("Startup"),
             Block::Setting(Setting::Startup),
             Block::Section("Reset"),
@@ -324,6 +333,7 @@ fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
             Block::Setting(Setting::Percent) => controls.push((Control::PercentToggle, row(top))),
             Block::Setting(Setting::Startup) => controls.push((Control::StartupToggle, row(top))),
             Block::Setting(Setting::TaskbarPin) => controls.push((Control::PinToggle, row(top))),
+            Block::Setting(setting @ (Setting::Hover | Setting::Click)) => controls.extend(segment_rects(canvas, state.fonts.body, setting, right, top, dpi)),
             Block::Setting(Setting::Reset) => {
                 let label = if state.is_confirming_reset { RESET_CONFIRM_LABEL } else { RESET_LABEL };
                 controls.push((Control::Reset, button_rect(canvas, state.fonts.body, label, right, top, dpi)));
@@ -331,6 +341,12 @@ fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
             Block::Device(index) => {
                 let toggle = toggle_rect(right, top, dpi);
                 controls.push((Control::ShowToggle(index), toggle));
+                if is_renaming(state, devices.get(index)) {
+                    let (save, cancel) = rename_buttons(canvas, state.fonts.body, toggle.left - scale(14, dpi), top, dpi);
+                    controls.push((Control::RenameSave(index), save));
+                    controls.push((Control::RenameCancel(index), cancel));
+                    continue;
+                }
                 let rename = button_rect(canvas, state.fonts.body, "Rename", toggle.left - scale(14, dpi), top, dpi);
                 controls.push((Control::Rename(index), rename));
                 if devices.get(index).is_some_and(|device| needs_name_confirm(device, &settings)) {
@@ -510,6 +526,7 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                     Setting::MenuText => rect_of(Control::MenuTextLess).map_or(right, |rect| rect.left),
                     Setting::Reset => rect_of(Control::Reset).map_or(right, |rect| rect.left),
                     Setting::Percent | Setting::Startup | Setting::TaskbarPin => toggle_rect(right, top, dpi).left,
+                    Setting::Hover | Setting::Click => rect_of(Control::Choice(setting, 0)).map_or(right, |rect| rect.left),
                 };
                 let label_room = control_left - scale(14, dpi) - text_x;
                 match setting {
@@ -519,6 +536,15 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                             let minutes = settings.poll_minutes;
                             draw_stepper(canvas, state, (Control::PollLess, Control::PollMore), &less, &more, &format!("{minutes} min"), minutes > MIN_POLL_MINUTES, minutes < MAX_POLL_MINUTES);
                         }
+                    }
+                    Setting::Hover | Setting::Click => {
+                        let (label, hint, chosen) = if setting == Setting::Hover {
+                            ("On hover", "When the pointer rests on the icon", settings.hover_action.number())
+                        } else {
+                            ("On click", "Right-click opens the menu", settings.click_action.number())
+                        };
+                        row_label(canvas, state, text_x, top, label, hint, label_room);
+                        draw_segments(canvas, state, controls, setting, chosen);
                     }
                     Setting::MenuText => {
                         row_label(canvas, state, text_x, top, "Menu text size", "The tray menu grows and shrinks with it", label_room);
@@ -575,9 +601,22 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                 }
                 let name_x = left + scale(DEVICE_TEXT_LEFT, dpi);
                 let first_control = rect_of(Control::ConfirmName(index)).or(rect_of(Control::Rename(index))).map_or(right, |rect| rect.left);
-                let is_renaming = state.edit.as_ref().is_some_and(|(_, id)| id == &device.id);
-                let label = if is_renaming { "" } else { device.name.as_str() };
-                row_label(canvas, state, name_x, top, label, &hint, first_control - scale(12, dpi) - name_x);
+                if is_renaming(state, Some(device)) {
+                    // A Windows 11 text box: rounded edge, a darker inside and the accent line along the bottom.
+                    let field = rename_field(canvas, state, top, right);
+                    let (x, y, w, h) = (field.left, field.top, field.right - field.left, field.bottom - field.top);
+                    let radius = scale(4, dpi) as f32;
+                    canvas.round_rect(x, y, w, h, radius, mix(theme.card, theme.text, 0.18), 1.0);
+                    canvas.round_rect(x + 1, y + 1, w - 2, h - 2, radius - 1.0, rename_fill(&theme), 1.0);
+                    canvas.round_rect(x + 1, y + h - scale(2, dpi), w - 2, scale(2, dpi), 0.0, theme.highlight, 1.0);
+                    for (control, label, is_accent) in [(Control::RenameSave(index), "Save", true), (Control::RenameCancel(index), "Cancel", false)] {
+                        if let Some(rect) = rect_of(control) {
+                            draw_button(canvas, state, &rect, label, control, is_accent);
+                        }
+                    }
+                } else {
+                    row_label(canvas, state, name_x, top, &device.name, &hint, first_control - scale(12, dpi) - name_x);
+                }
                 if let Some(rect) = rect_of(Control::Rename(index)) {
                     draw_button(canvas, state, &rect, "Rename", Control::Rename(index), false);
                 }
@@ -686,6 +725,19 @@ fn activate(control: Control) {
         Control::StartupToggle => {
             startup::set_enabled(!startup::is_enabled());
         }
+        Control::Choice(setting, option) => {
+            with_window(|state| {
+                {
+                    let mut settings = state.settings.borrow_mut();
+                    if setting == Setting::Hover {
+                        settings.hover_action = HoverAction::from_number(option);
+                    } else {
+                        settings.click_action = ClickAction::from_number(option);
+                    }
+                }
+                save_and_announce(state);
+            });
+        }
         Control::PinToggle => {
             tray_pin::set_pinned(!tray_pin::is_pinned());
         }
@@ -705,6 +757,8 @@ fn activate(control: Control) {
                 open_rename(index, device);
             }
         }
+        Control::RenameSave(_) => close_rename(true),
+        Control::RenameCancel(_) => close_rename(false),
         Control::ShowToggle(index) => {
             if let Some(device) = devices.get(index) {
                 with_window(|state| {
@@ -732,6 +786,83 @@ fn activate(control: Control) {
     invalidate();
 }
 
+/// The options of a segmented choice, as NetSpeedGauge's "On hover" and "On click" rows offer them.
+fn segment_options(setting: Setting) -> &'static [&'static str] {
+    if setting == Setting::Hover { &["Nothing", "Battery card"] } else { &["Menu", "Battery card", "Settings"] }
+}
+
+/// Returns each option's rectangle of a segmented choice ending at the right edge, NetSpeedGauge's sizes.
+fn segment_rects(canvas: &Canvas, font: HFONT, setting: Setting, right: i32, top: i32, dpi: u32) -> Vec<(Control, RECT)> {
+    let pad = scale(13, dpi);
+    let widths: Vec<i32> = segment_options(setting).iter().map(|option| canvas.text_width(option, font) + pad * 2).collect();
+    let (segment_top, height) = (top + scale(9, dpi), scale(32, dpi));
+    let mut x = right - widths.iter().sum::<i32>();
+    widths
+        .iter()
+        .enumerate()
+        .map(|(position, width)| {
+            let rect = RECT { left: x, top: segment_top, right: x + width, bottom: segment_top + height };
+            x += width;
+            (Control::Choice(setting, position as u8), rect)
+        })
+        .collect()
+}
+
+/// Draws NetSpeedGauge's segmented choice: a sunken track, the chosen option raised, the others muted.
+fn draw_segments(canvas: &mut Canvas, state: &Window, controls: &[(Control, RECT)], setting: Setting, chosen: u8) {
+    let (theme, dpi, fonts) = (state.theme, state.dpi, &state.fonts);
+    let segments: Vec<(u8, RECT)> = controls.iter().filter_map(|(control, rect)| match control {
+        Control::Choice(row, option) if *row == setting => Some((*option, *rect)),
+        _ => None,
+    }).collect();
+    let (Some((_, first)), Some((_, last))) = (segments.first(), segments.last()) else { return };
+    let radius = scale(CARD_RADIUS, dpi) as f32;
+    let track = if theme.is_dark { 0x232323 } else { 0xE2E2E2 };
+    canvas.round_rect(first.left, first.top, last.right - first.left, first.bottom - first.top, radius, track, 1.0);
+    let inset = scale(3, dpi);
+    for (option, rect) in &segments {
+        let control = Control::Choice(setting, *option);
+        let is_chosen = *option == chosen;
+        if is_chosen {
+            canvas.round_rect(rect.left + inset, rect.top + inset, rect.right - rect.left - inset * 2, rect.bottom - rect.top - inset * 2, radius - inset as f32 / 2.0, theme.selected, 1.0);
+        }
+        let color = if is_chosen || state.hovered == Some(control) { theme.text } else { theme.muted };
+        let font = if is_chosen { fonts.strong } else { fonts.body };
+        let label = segment_options(setting).get(*option as usize).copied().unwrap_or_default();
+        canvas.text((rect.left + rect.right) / 2, rect.top + scale(6, dpi), label, font, color, Align::Center);
+        if state.focused == Some(control) {
+            draw_focus(canvas, &theme, rect, dpi);
+        }
+    }
+}
+
+/// Returns the inside colour of a text box, as Windows 11 draws one: darker than the card in dark mode.
+fn rename_fill(theme: &Theme) -> u32 {
+    if theme.is_dark { 0x1E1E1E } else { 0xFFFFFF }
+}
+
+/// Checks whether this device's name is being edited.
+fn is_renaming(state: &Window, device: Option<&Device>) -> bool {
+    device.is_some_and(|device| state.edit.as_ref().is_some_and(|(_, id)| id == &device.id))
+}
+
+/// Returns the Save and Cancel buttons shown while renaming, Save ending at the given right edge.
+fn rename_buttons(canvas: &Canvas, font: HFONT, right: i32, top: i32, dpi: u32) -> (RECT, RECT) {
+    let save = button_rect(canvas, font, "Save", right, top, dpi);
+    let cancel = button_rect(canvas, font, "Cancel", save.left - scale(8, dpi), top, dpi);
+    (save, cancel)
+}
+
+/// Returns the text box drawn over a device's name while renaming, from the name to the buttons.
+fn rename_field(canvas: &Canvas, state: &Window, top: i32, right: i32) -> RECT {
+    let dpi = state.dpi;
+    let (left, _) = content_columns(dpi);
+    let toggle = toggle_rect(right, top, dpi);
+    let (_, cancel) = rename_buttons(canvas, state.fonts.body, toggle.left - scale(14, dpi), top, dpi);
+    let field_top = top + scale(10, dpi);
+    RECT { left: left + scale(DEVICE_TEXT_LEFT - 8, dpi), top: field_top, right: cancel.left - scale(12, dpi), bottom: field_top + scale(CONTROL_HEIGHT, dpi) }
+}
+
 /// Opens a text box over a device's name for renaming. Enter or leaving the box saves; Esc cancels.
 fn open_rename(index: usize, device: &Device) {
     close_rename(true);
@@ -740,11 +871,16 @@ fn open_rename(index: usize, device: &Device) {
         let Some(row_top) = placed_blocks(state).into_iter().find(|(block, _)| *block == Block::Device(index)).map(|(_, top)| top) else { return };
         // SAFETY: the window is alive while it is stored; the edit box is its child and dies with it.
         unsafe {
-            let (content_left, _) = content_columns(dpi);
-            let left = content_left + scale(DEVICE_TEXT_LEFT, dpi);
-            let top = row_top + scale(5, dpi);
-            let width = scale(200, dpi);
-            let height = scale(20, dpi);
+            let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetClientRect(state.window, &mut client);
+            let canvas = Canvas::new(client.right, 1);
+            let (content_left, content_width) = content_columns(dpi);
+            let field = rename_field(&canvas, state, row_top, content_left + content_width - scale(14, dpi));
+            let text_height = canvas.text_height(state.fonts.body);
+            let left = field.left + scale(10, dpi);
+            let top = field.top + (field.bottom - field.top - text_height) / 2;
+            let width = field.right - field.left - scale(20, dpi);
+            let height = text_height;
             let class = to_wide("EDIT");
             let text = to_wide(&device.name);
             let edit = CreateWindowExW(
@@ -964,7 +1100,7 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
             if let Some((theme, brush)) = colors {
                 let swap = |color: u32| ((color & 0xFF) << 16) | (color & 0xFF00) | ((color >> 16) & 0xFF);
                 SetTextColor(device_context, swap(theme.text));
-                SetBkColor(device_context, swap(theme.card));
+                SetBkColor(device_context, swap(rename_fill(&theme)));
                 return brush as LRESULT;
             }
             DefWindowProcW(window, message, wparam, lparam)
@@ -1029,7 +1165,7 @@ fn listen_for_theme() {
             // SAFETY: the brush was made for the old theme and is replaced once here.
             unsafe {
                 DeleteObject(state.edit_brush);
-                state.edit_brush = CreateSolidBrush(swap_rgb(state.theme.card));
+                state.edit_brush = CreateSolidBrush(swap_rgb(rename_fill(&state.theme)));
             }
         });
         invalidate();
@@ -1101,7 +1237,7 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
                 focused: None,
                 scroll: 0,
                 edit: None,
-                edit_brush: CreateSolidBrush(swap_rgb(theme.card)),
+                edit_brush: CreateSolidBrush(swap_rgb(rename_fill(&theme))),
                 is_confirming_reset: false,
             });
         });
