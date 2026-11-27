@@ -1,5 +1,5 @@
 //! The two flyouts that open from the tray icon, drawn like NetSpeedGauge's popup: a left click (or
-//! hovering, when chosen) shows the devices flyout, a summary line and one compact row per device;
+//! hovering, when chosen) shows the devices flyout, a title line and one compact row per device;
 //! a right click shows the menu, Settings and Quit only. Long names are cut and the full name,
 //! connection and state show in a tooltip.
 
@@ -37,7 +37,7 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 // Sizes from NetSpeedGauge's popup menu (windows/src/popup_ui.rs), at 100% scaling.
 const CLASS_NAME: &str = "JuiceBarFlyout";
 const MIN_WIDTH: i32 = 164;
-const SUMMARY_HEIGHT: i32 = 34;
+const HEADER_HEIGHT: i32 = 34;
 const ROW_HEIGHT: i32 = 32;
 const PADDING: i32 = 5;
 const SIDE: i32 = 14;
@@ -241,7 +241,7 @@ fn unit(value: i32, dpi: u32) -> i32 {
 
 /// Returns the devices flyout's height in pixels at 100% scaling for a number of device rows and a text size.
 pub fn menu_height(device_rows: usize, points: u32) -> i32 {
-    let total = SUMMARY_HEIGHT + PADDING + device_rows.max(1) as i32 * ROW_HEIGHT + PADDING;
+    let total = HEADER_HEIGHT + PADDING + device_rows.max(1) as i32 * ROW_HEIGHT + PADDING;
     (total as f32 * menu_scale(points)).round() as i32
 }
 
@@ -284,9 +284,9 @@ fn column_widths(canvas: &Canvas, fonts: &Fonts, rows: &[DeviceRow], dpi: u32, i
     (names, width.max(unit(MIN_WIDTH, dpi)))
 }
 
-/// Returns the y position of a device row, under the summary line.
+/// Returns the y position of a device row, under the title line.
 fn row_top(row: usize, dpi: u32) -> i32 {
-    unit(SUMMARY_HEIGHT + PADDING + row as i32 * ROW_HEIGHT, dpi)
+    unit(HEADER_HEIGHT + PADDING + row as i32 * ROW_HEIGHT, dpi)
 }
 
 /// Returns each target and its rectangle, at the flyout's scaling.
@@ -344,18 +344,11 @@ fn paint(flyout: &Flyout, canvas: &mut Canvas) {
     let width = canvas.width();
     canvas.clear(theme.surface, 1.0);
     if flyout.is_card {
-        // The summary line, as NetSpeedGauge's "Today" line: the app on the left, the lowest % on the right.
+        // A title line only, as on the Mac. No lowest %: the jar icon hints at it and every row shows its exact %.
         let divider_x = unit(PADDING, dpi);
-        let summary = RECT { left: 0, top: 0, right: width, bottom: unit(SUMMARY_HEIGHT, dpi) };
-        canvas.text(unit(SIDE, dpi), centred(canvas, &summary, fonts.small), "Juice Bar", fonts.small, theme.muted, Align::Left);
-        let lowest = flyout.rows.iter().filter_map(|row| match &row.end {
-            RowEnd::Percent { text, tone, .. } => text.trim_end_matches('%').parse::<u8>().ok().map(|percent| (percent, *tone)),
-            _ => None,
-        }).min_by_key(|(percent, _)| *percent);
-        if let Some((percent, tone)) = lowest {
-            canvas.text(width - unit(SIDE, dpi), centred(canvas, &summary, fonts.strong), &format!("Lowest {percent}%"), fonts.strong, tone_color(tone, &theme), Align::Right);
-        }
-        canvas.round_rect(divider_x, unit(SUMMARY_HEIGHT, dpi), width - divider_x * 2, scale(1, dpi).max(1), 0.0, theme.border, 1.0);
+        let header = RECT { left: 0, top: 0, right: width, bottom: unit(HEADER_HEIGHT, dpi) };
+        canvas.text(unit(SIDE, dpi), centred(canvas, &header, fonts.small), "Juice Bar", fonts.small, theme.muted, Align::Left);
+        canvas.round_rect(divider_x, unit(HEADER_HEIGHT, dpi), width - divider_x * 2, scale(1, dpi).max(1), 0.0, theme.border, 1.0);
         if flyout.rows.is_empty() {
             let top = row_top(0, dpi);
             canvas.text(unit(SIDE, dpi), centred(canvas, &RECT { left: 0, top, right: width, bottom: top + unit(ROW_HEIGHT, dpi) }, fonts.body), EMPTY_TEXT, fonts.body, theme.muted, Align::Left);
@@ -736,7 +729,7 @@ pub fn show_menu() {
     open_flyout(&[], false, false);
 }
 
-/// Opens the devices flyout: the summary and one row per device. Opened by hovering, it never takes
+/// Opens the devices flyout: the title line and one row per device. Opened by hovering, it never takes
 /// focus and gives way to an open menu.
 pub fn show_card(devices: &[Device], is_hover: bool) {
     if is_hover && is_menu_open() {
