@@ -243,3 +243,10 @@ mod bluetooth {
         assert_eq!(paired_to_device(&paired(None), DeviceKind::Mouse, &mouse).name, "XS Flow+2");
     }
 }
+
+#[test]
+fn taskbar_pin_matches_its_own_program_whatever_the_case() {
+    use juicebar_windows::tray_pin::is_same_program;
+    assert!(is_same_program(r"C:\Users\a\AppData\Local\Programs\JuiceBar\JuiceBar.exe", r"c:\users\a\appdata\local\programs\juicebar\JUICEBAR.EXE"));
+    assert!(!is_same_program(r"D:\juice-bar\target\release\JuiceBar.exe", r"C:\Users\a\AppData\Local\Programs\JuiceBar\JuiceBar.exe"));
+}
