@@ -6,7 +6,7 @@ use juicebar_shared::device::{Battery, Connection, Device, DeviceKind, NameSourc
 use juicebar_shared::tone::Tone;
 use juicebar_windows::app::tooltip_text;
 use juicebar_windows::glyph::glass_image;
-use juicebar_windows::menu_ui::{build_device_row, menu_height, place_flyout, RowEnd};
+use juicebar_windows::menu_ui::{build_device_row, menu_height, menu_scale, place_flyout, RowEnd};
 use juicebar_windows::startup::startup_command;
 use juicebar_windows::status_icon::{glyph_color, unpremultiply};
 use juicebar_windows::theme::{build_theme, AMBER, GREEN, RED};
@@ -97,8 +97,16 @@ fn flyout_sits_beside_a_left_taskbar() {
 
 #[test]
 fn flyout_height_grows_with_rows_and_keeps_room_for_the_empty_line() {
-    assert_eq!(menu_height(0), menu_height(1));
-    assert_eq!(menu_height(3) - menu_height(2), 32, "NetSpeedGauge's 32 px menu rows");
+    assert_eq!(menu_height(0, 9), menu_height(1, 9));
+    let row = menu_height(3, 9) - menu_height(2, 9);
+    assert!((25..=26).contains(&row), "80% of NetSpeedGauge's 32 px rows, got {row}");
+}
+
+#[test]
+fn flyout_scales_with_the_menu_text_size() {
+    assert!((menu_scale(9) - 0.8).abs() < 1e-6, "80% at the default 9 pt");
+    assert!(menu_height(2, 12) > menu_height(2, 9));
+    assert!(menu_height(2, 7) < menu_height(2, 9));
 }
 
 #[test]
