@@ -8,7 +8,7 @@ use crate::messages::WM_APP_MENU_ACTION;
 use crate::status_icon::{focus_status_icon, status_icon_rect};
 use crate::theme::{apply_window_look, current_theme, on_theme_change, tone_color, Backdrop, Theme, ICON_FONT, UI_FONT, UI_FONT_STRONG};
 use crate::util::{copy_into, scale, to_wide};
-use juicebar_shared::device::{Connection, Device};
+use juicebar_shared::device::{Connection, Device, DeviceKind};
 use juicebar_shared::names::short_name;
 use juicebar_shared::tone::{tone_for_percent, Tone};
 use juicebar_shared::settings::{MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
@@ -44,7 +44,8 @@ const SIDE: i32 = 14;
 const LABEL_LEFT: i32 = 40;
 // The least space between a name and the right column, so the two never touch.
 const PERCENT_GAP: i32 = 24;
-const DOT_RADIUS: i32 = 4;
+const ICON_MOUSE: &str = "\u{E962}";
+const ICON_KEYBOARD: &str = "\u{E765}";
 const HOVER_RADIUS: i32 = 5;
 // The flyout is 80% of NetSpeedGauge's popup at the default text size (his call, 28 Nov).
 const MENU_SIZE: f32 = 0.8;
@@ -98,8 +99,8 @@ pub struct DeviceRow {
     pub end: RowEnd,
     /// Drawn in grey: no reading.
     pub is_dimmed: bool,
-    /// The dot left of the name; None draws a hollow grey ring.
-    pub dot: Option<Tone>,
+    /// What the device is, drawn as a muted mouse or keyboard icon left of the name, as on the Mac.
+    pub kind: DeviceKind,
 }
 
 /// Returns the label for how a device is connected.
@@ -132,7 +133,7 @@ pub fn build_device_row(device: &Device) -> DeviceRow {
         connection,
         is_dimmed: device.battery.is_none() && !device.is_unrecognised(),
         end,
-        dot: device.battery.map(|battery| tone_for_percent(battery.percent)),
+        kind: device.kind,
     }
 }
 
@@ -373,13 +374,9 @@ fn paint(flyout: &Flyout, canvas: &mut Canvas) {
         match target {
             Target::Device(index) => {
                 let row = &flyout.rows[*index];
-                let middle = rect.top + (rect.bottom - rect.top) / 2;
-                let dot_x = unit(SIDE + DOT_RADIUS + 2, dpi);
-                let radius = unit(DOT_RADIUS, dpi);
-                match row.dot {
-                    Some(tone) => canvas.circle(dot_x, middle, radius, tone_color(tone, &theme)),
-                    None => canvas.round_outline(dot_x - radius, middle - radius, radius * 2, radius * 2, radius as f32, 1.5, theme.muted, 1.0),
-                }
+                // A muted kind icon, as on the Mac: keyboard for keyboards, mouse for everything else.
+                let kind_icon = if row.kind == DeviceKind::Keyboard { ICON_KEYBOARD } else { ICON_MOUSE };
+                canvas.text(unit(SIDE, dpi), centred(canvas, rect, fonts.icon), kind_icon, fonts.icon, theme.muted, Align::Left);
                 let name_color = if row.is_dimmed { theme.muted } else { theme.text };
                 let name = fit_text(canvas, &row.name, fonts.body, name_column);
                 canvas.text(label_x, centred(canvas, rect, fonts.body), &name, fonts.body, name_color, Align::Left);

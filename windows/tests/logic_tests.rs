@@ -63,7 +63,7 @@ fn unrecognised_device_offers_report_and_detect() {
     let row = build_device_row(&device("Unknown mouse", None, None));
     assert_eq!(row.end, RowEnd::Actions);
     assert!(!row.is_dimmed);
-    assert_eq!(row.dot, None);
+    assert_eq!(row.kind, DeviceKind::Mouse);
 }
 
 #[test]
