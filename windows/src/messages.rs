@@ -10,3 +10,5 @@ pub const WM_APP_SCAN_DONE: u32 = WM_APP + 2;
 pub const WM_APP_MENU_ACTION: u32 = WM_APP + 3;
 /// The settings window changed a choice that the icon or the menu shows.
 pub const WM_APP_SETTINGS_CHANGED: u32 = WM_APP + 4;
+/// A keyboard dongle pushed a wake, sleep or battery event; it waits in the app.
+pub const WM_APP_KEYBOARD_EVENT: u32 = WM_APP + 5;

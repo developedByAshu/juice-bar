@@ -1,7 +1,7 @@
 //! The process entry: one copy only, the hidden main window and its message handling.
 
 use crate::app::{with_app, App};
-use crate::messages::{WM_APP_MENU_ACTION, WM_APP_SCAN_DONE, WM_APP_SETTINGS_CHANGED, WM_APP_TRAY};
+use crate::messages::{WM_APP_KEYBOARD_EVENT, WM_APP_MENU_ACTION, WM_APP_SCAN_DONE, WM_APP_SETTINGS_CHANGED, WM_APP_TRAY};
 use crate::status_icon::{redraw_status_icon, remove_status_icon, restore_status_icon};
 use crate::theme::notify_theme_change;
 use crate::util::to_wide;
@@ -56,6 +56,10 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
         }
         WM_APP_SCAN_DONE => {
             with_app(App::on_scan_done);
+            0
+        }
+        WM_APP_KEYBOARD_EVENT => {
+            with_app(App::on_keyboard_events);
             0
         }
         WM_APP_MENU_ACTION => {

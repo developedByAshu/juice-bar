@@ -1,17 +1,19 @@
 //! The app's state: the devices, the choices, and when to read the batteries again.
 //!
-//! Reads happen on launch, on wake from sleep, when a USB device comes or goes, and every poll
-//! interval; nothing runs between them. A read talks to the dongles, which can take a moment, so
+//! Reads happen on launch, on wake from sleep, when a USB device comes or goes, when a keyboard
+//! wakes, and every poll interval; nothing runs between them. Between jobs the read thread waits on
+//! each keyboard dongle's command channel for the wake, sleep and battery events it pushes. A read talks to the dongles, which can take a moment, so
 //! it runs on one long-lived read thread that owns the only HidApi and posts results back to the UI thread.
 
 use crate::bluetooth::{bluetooth_devices, remembered_names_by_kind};
 use crate::menu_ui::{close_hover_card, close_menu, is_menu_open, refresh_menu, set_menu_text_points, show_card, show_menu, take_menu_action, MenuAction};
-use crate::messages::WM_APP_SCAN_DONE;
+use crate::messages::{WM_APP_KEYBOARD_EVENT, WM_APP_SCAN_DONE};
 use crate::settings_ui::{close_settings, open_settings, refresh_settings};
 use crate::status_icon::{create_status_icon, set_tooltip, update_status_icon, use_hover_card};
 use crate::util::to_wide;
 use juicebar_shared::demo::{is_demo_mode, sample_devices};
 use juicebar_shared::device::{Device, NameSource};
+use juicebar_shared::protocols::bytech::{parse_event, KeyboardEvent};
 use juicebar_shared::report::{report_url, InterfaceSummary};
 use juicebar_shared::scan::{build_device, probe_usb_device, scan_dongles, ScannedDevice};
 use juicebar_shared::settings::{ClickAction, HoverAction, Settings};
@@ -42,6 +44,46 @@ struct ScanResult {
 }
 
 static SCAN_RESULT: Mutex<Option<ScanResult>> = Mutex::new(None);
+/// Keyboard events from the read thread, oldest first, with the dongle's vendor and product id.
+static KEYBOARD_EVENTS: Mutex<Vec<(u16, u16, KeyboardEvent)>> = Mutex::new(Vec::new());
+
+/// How long one pass waits on the held keyboard channels before checking for new work, in total.
+const WATCH_WAIT_MS: i32 = 500;
+
+/// A keyboard dongle's command channel, held open to hear what it pushes.
+struct KeyboardWatch {
+    vendor_id: u16,
+    product_id: u16,
+    device: hidapi::HidDevice,
+}
+
+/// Opens (shared) the command channel of every known bytech keyboard dongle that is plugged in.
+fn open_keyboard_watches(api: &hidapi::HidApi) -> Vec<KeyboardWatch> {
+    api.device_list()
+        .filter(|info| juicebar_shared::catalog::find_known(info.vendor_id(), info.product_id(), info.usage_page()).is_some_and(|known| known.protocol == "bytech"))
+        .filter_map(|info| info.open_device(api).ok().map(|device| KeyboardWatch { vendor_id: info.vendor_id(), product_id: info.product_id(), device }))
+        .collect()
+}
+
+/// Waits briefly on the held channels and hands each pushed event to the UI thread. A channel that
+/// errors (dongle unplugged) is dropped; the next read opens it again.
+fn wait_for_keyboard_events(watches: &mut Vec<KeyboardWatch>, window: isize) {
+    let wait = WATCH_WAIT_MS / watches.len().max(1) as i32;
+    watches.retain(|watch| {
+        let mut buffer = [0u8; 64];
+        match watch.device.read_timeout(&mut buffer, wait) {
+            Ok(size) => {
+                if let Some(event) = parse_event(&buffer[..size]) {
+                    KEYBOARD_EVENTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push((watch.vendor_id, watch.product_id, event));
+                    // SAFETY: posting to the app's own window, which outlives the read thread's work.
+                    unsafe { PostMessageW(window as HWND, WM_APP_KEYBOARD_EVENT, 0, 0) };
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    });
+}
 
 /// Set by `--open-menu`: open the flyout once the first read is in, for screenshots.
 pub static OPEN_MENU_AFTER_SCAN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -149,11 +191,35 @@ fn scan_sender() -> &'static Mutex<std::sync::mpsc::Sender<ScanRequest>> {
         std::thread::spawn(move || {
             // One HidApi for the whole run: hidapi is not safe to create on several threads.
             let mut api = None;
-            while let Ok(request) = inbox.recv() {
-                let result = scan(&mut api, &request);
-                *SCAN_RESULT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
-                // SAFETY: posting to the app's own window, which outlives every read.
-                unsafe { PostMessageW(request.window as HWND, WM_APP_SCAN_DONE, 0, 0) };
+            let mut watches: Vec<KeyboardWatch> = Vec::new();
+            let mut window = 0isize;
+            loop {
+                // With no channel to watch, sleep until work comes; otherwise check for work between waits.
+                let request = if watches.is_empty() {
+                    match inbox.recv() {
+                        Ok(request) => Some(request),
+                        Err(_) => break,
+                    }
+                } else {
+                    match inbox.try_recv() {
+                        Ok(request) => Some(request),
+                        Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                    }
+                };
+                if let Some(request) = request {
+                    window = request.window;
+                    watches.clear();
+                    let result = scan(&mut api, &request);
+                    if !is_demo_mode() {
+                        watches = api.as_ref().map_or_else(Vec::new, open_keyboard_watches);
+                    }
+                    *SCAN_RESULT.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result);
+                    // SAFETY: posting to the app's own window, which outlives every read.
+                    unsafe { PostMessageW(request.window as HWND, WM_APP_SCAN_DONE, 0, 0) };
+                    continue;
+                }
+                wait_for_keyboard_events(&mut watches, window);
             }
         });
         Mutex::new(sender)
@@ -256,6 +322,29 @@ impl App {
         }
         if std::mem::take(&mut self.is_scan_wanted) {
             self.refresh();
+        }
+    }
+
+    /// Acts on keyboard events at once: a wake reads the battery now, sleep clears it, a push shows it.
+    pub fn on_keyboard_events(&mut self) {
+        let events = std::mem::take(&mut *KEYBOARD_EVENTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        let mut changed = false;
+        for (vendor_id, product_id, event) in events {
+            if event == KeyboardEvent::Awake {
+                self.refresh();
+                continue;
+            }
+            let battery = match event {
+                KeyboardEvent::Battery(battery) => Some(battery),
+                _ => None,
+            };
+            for device in self.devices.borrow_mut().iter_mut().filter(|device| device.vendor_id == vendor_id && device.product_id == product_id) {
+                device.battery = battery;
+                changed = true;
+            }
+        }
+        if changed {
+            self.show_devices();
         }
     }
 
