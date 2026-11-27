@@ -6,12 +6,13 @@ use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::{msg_send, AnyThread, ClassType};
 use objc2_app_kit::{
-    NSBezierPath, NSColor, NSCompositingOperation, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration,
+    NSBezierPath, NSBitmapImageRep, NSColor, NSCompositingOperation, NSFont, NSFontAttributeName, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration,
     NSLineCapStyle, NSLineJoinStyle,
 };
 use objc2_foundation::{NSAttributedString, NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
 pub const WEIGHT_REGULAR: f64 = 0.0;
+pub const WEIGHT_MEDIUM: f64 = 0.23;
 pub const WEIGHT_SEMIBOLD: f64 = 0.3;
 
 // The Windows numbers are in points at 96 dots per inch, so they draw this much larger on a Mac.
@@ -45,6 +46,12 @@ impl Font {
     pub fn system(points: f64, weight: f64) -> Self {
         let size = points * POINT_SCALE;
         Self::wrap(NSFont::systemFontOfSize_weight(size, weight), size)
+    }
+
+    /// Returns the system font with digits all one width, so a column of numbers lines up.
+    pub fn digits(points: f64, weight: f64) -> Self {
+        let size = points * POINT_SCALE;
+        Self::wrap(NSFont::monospacedDigitSystemFontOfSize_weight(size, weight), size)
     }
 
     /// Returns the AppKit font, for a real control that must match the drawn text.
@@ -137,16 +144,78 @@ pub fn text(x: i32, y: i32, text: &str, font: &Font, rgb: u32, align: Align) {
     let _: () = unsafe { msg_send![&*string, drawAtPoint: point, withAttributes: &*attributes] };
 }
 
-/// Draws an SF Symbol centred on a point, at a size in Windows points.
-pub fn symbol(center_x: i32, center_y: i32, name: &str, points: f64, rgb: u32) {
-    let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None) else {
-        return;
-    };
+fn symbol_image(name: &str, points: f64, rgb: u32) -> Option<Retained<NSImage>> {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&NSString::from_str(name), None)?;
     let fill = color(rgb);
     let sized = NSImageSymbolConfiguration::configurationWithPointSize_weight(points * POINT_SCALE, WEIGHT_REGULAR);
     let tinted = NSImageSymbolConfiguration::configurationWithHierarchicalColor(&fill);
     let config = sized.configurationByApplyingConfiguration(&tinted);
-    let Some(image) = image.imageWithSymbolConfiguration(&config) else {
+    image.imageWithSymbolConfiguration(&config)
+}
+
+/// Returns how wide an SF Symbol draws at a size in Windows points.
+pub fn symbol_width(name: &str, points: f64) -> i32 {
+    symbol_image(name, points, 0).map_or(0, |image| image.size().width.round() as i32)
+}
+
+/// Draws one line of text whose ink, not its advance, ends exactly at `right`, so a column of
+/// different glyphs (a %, a Q, a comma) lines up to the pixel. `y` is the top of the line.
+pub fn text_ink_right(right: i32, y: i32, text: &str, font: &Font, rgb: u32) {
+    let string = NSString::from_str(text);
+    let attributes = attributes(font, rgb);
+    // Line fragment origin plus device metrics: the bounds of the drawn glyphs themselves.
+    let options: usize = 1 | 8;
+    let huge = NSSize::new(10_000.0, 10_000.0);
+    // SAFETY: both objects are valid, and a nil context is allowed.
+    let ink: NSRect = unsafe { msg_send![&*string, boundingRectWithSize: huge, options: options, attributes: &*attributes, context: std::ptr::null::<AnyObject>()] };
+    let left = f64::from(right) - (ink.origin.x + ink.size.width);
+    let point = NSPoint::new(left, f64::from(y) + font.nudge);
+    // SAFETY: both objects are valid, and this only runs while a view is being painted.
+    let _: () = unsafe { msg_send![&*string, drawAtPoint: point, withAttributes: &*attributes] };
+}
+
+thread_local! {
+    static CLEAR_SPACE: std::cell::RefCell<std::collections::HashMap<String, f64>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
+/// Returns the clear space, in points, between a symbol's last inked column and its image's right side.
+/// A symbol's image pads the glyph a little, and its alignment box includes that padding.
+fn clear_space_right(image: &NSImage) -> f64 {
+    let size = image.size();
+    let key = format!("{:?}{}x{}", image.name(), size.width, size.height);
+    if let Some(space) = CLEAR_SPACE.with(|cache| cache.borrow().get(&key).copied()) {
+        return space;
+    }
+    let space = image
+        .TIFFRepresentation()
+        .and_then(|data| NSBitmapImageRep::imageRepWithData(&data))
+        .and_then(|bitmap| {
+            let (wide, high) = (bitmap.pixelsWide(), bitmap.pixelsHigh());
+            let inked = (0..wide).rev().find(|&x| (0..high).any(|y| bitmap.colorAtX_y(x, y).is_some_and(|pixel| pixel.alphaComponent() > 0.3)))?;
+            Some((wide - 1 - inked) as f64 * size.width / wide as f64)
+        })
+        .unwrap_or(0.0);
+    CLEAR_SPACE.with(|cache| cache.borrow_mut().insert(key, space));
+    space
+}
+
+/// Draws an SF Symbol whose right side is at `right`, centred on `center_y`.
+pub fn symbol_right(right: i32, center_y: i32, name: &str, points: f64, rgb: u32) {
+    let Some(image) = symbol_image(name, points, rgb) else {
+        return;
+    };
+    let size = image.size();
+    let glyph_right = size.width - clear_space_right(&image);
+    let origin = NSPoint::new(f64::from(right) - glyph_right, f64::from(center_y) - size.height / 2.0);
+    // SAFETY: this only runs while a view is being painted, and no drawing hints are passed.
+    unsafe {
+        image.drawInRect_fromRect_operation_fraction_respectFlipped_hints(NSRect::new(origin, size), NSRect::ZERO, NSCompositingOperation::SourceOver, 1.0, true, None);
+    }
+}
+
+/// Draws an SF Symbol centred on a point, at a size in Windows points.
+pub fn symbol(center_x: i32, center_y: i32, name: &str, points: f64, rgb: u32) {
+    let Some(image) = symbol_image(name, points, rgb) else {
         return;
     };
     let size = image.size();

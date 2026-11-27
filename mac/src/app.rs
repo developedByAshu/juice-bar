@@ -145,7 +145,13 @@ pub fn capture_finish() {
     if std::env::var("JUICEBAR_CAPTURE").as_deref() == Ok("reset") {
         eprintln!("capture: still running after the reset, quitting");
     } else if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_PATH") {
-        crate::settings_ui::capture_to(&path);
+        let menu = with_app(|app| app.menu.clone());
+        let is_menu = std::env::var("JUICEBAR_CAPTURE").as_deref() == Ok("menu");
+        let saved = match menu {
+            Some(menu) if is_menu => menu_ui::capture_open_menu(&menu, &path),
+            _ => crate::settings_ui::capture_to(&path),
+        };
+        eprintln!("capture: saved {path}: {saved}");
     }
     with_app(|app| app.menu.cancelTracking());
     NSApplication::sharedApplication(main_thread()).terminate(None);

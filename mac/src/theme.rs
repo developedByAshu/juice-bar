@@ -24,6 +24,27 @@ pub fn tone_color(tone: Tone) -> Retained<NSColor> {
     }
 }
 
+/// Returns a tone as 0xRRGGBB for drawn text. Call it while a view paints, so the system colour resolves for that view's look.
+pub fn tone_rgb(tone: Tone, theme: &Theme) -> u32 {
+    if tone == Tone::Plain {
+        return theme.text;
+    }
+    let Some(resolved) = tone_color(tone).colorUsingColorSpace(&NSColorSpace::sRGBColorSpace()) else {
+        return theme.text;
+    };
+    let channel = |value: f64| (value * 255.0).round().clamp(0.0, 255.0) as u32;
+    (channel(resolved.redComponent()) << 16) | (channel(resolved.greenComponent()) << 8) | channel(resolved.blueComponent())
+}
+
+/// Returns the theme for an appearance, such as a menu's.
+pub fn theme_for(appearance: &NSAppearance) -> Theme {
+    if appearance.name().to_string().contains("Dark") {
+        dark_theme()
+    } else {
+        light_theme()
+    }
+}
+
 /// Checks whether the menu bar currently draws in dark mode.
 pub fn current_theme_is_dark() -> bool {
     let appearance = NSApplication::sharedApplication(main_thread()).effectiveAppearance();
@@ -40,6 +61,8 @@ pub struct Theme {
     pub segment_track_on_card: u32,
     pub segment_selected: u32,
     pub border: u32,
+    /// The popup and menu surface, which the menu's hover blends from.
+    pub surface: u32,
     pub button: u32,
     pub button_hover: u32,
     pub text: u32,
@@ -61,6 +84,7 @@ pub fn dark_palette(accent: u32) -> Theme {
         segment_track_on_card: 0x232323,
         segment_selected: 0x454545,
         border: 0x3A3A3A,
+        surface: 0x323232,
         button: 0x3A3A3A,
         button_hover: 0x454545,
         text: 0xF5F5F5,
@@ -82,6 +106,7 @@ pub fn light_palette(accent: u32) -> Theme {
         segment_track_on_card: 0xE2E2E2,
         segment_selected: 0xFFFFFF,
         border: 0xD4D4D4,
+        surface: 0xFFFFFF,
         button: 0xE2E2E2,
         button_hover: 0xD6D6D6,
         text: 0x1B1B1B,
