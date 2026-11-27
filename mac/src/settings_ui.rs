@@ -260,7 +260,9 @@ fn device_hint(device: &Device) -> String {
         Connection::Usb => "cable",
     };
     let level = match device.battery {
-        Some(battery) if battery.is_charging => format!("{}%, charging", battery.percent),
+        // On its cable a device charges, whatever its reading says, as the menu shows it.
+        Some(battery) if battery.is_charging || device.connection == Connection::Usb => format!("{}%, charging", battery.percent),
+        None if device.connection == Connection::Usb => "charging".to_string(),
         Some(battery) => format!("{}%", battery.percent),
         None => "no reading yet".to_string(),
     };

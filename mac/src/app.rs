@@ -509,12 +509,12 @@ fn on_keyboard_event(vendor_id: u16, product_id: u16, event: juicebar_shared::pr
         return;
     }
     with_app(|app| {
-        let battery = match event {
-            KeyboardEvent::Battery(battery) => Some(battery),
-            _ => None,
-        };
         for scanned in app.scanned.iter_mut().filter(|scanned| scanned.device.vendor_id == vendor_id && scanned.device.product_id == product_id) {
-            scanned.device.battery = battery;
+            // A push carries only the %: it keeps the charging state the last real reading gave.
+            scanned.device.battery = match event {
+                KeyboardEvent::Battery(pushed) => Some(juicebar_shared::protocols::bytech::with_pushed_percent(scanned.device.battery, pushed)),
+                _ => None,
+            };
         }
         rebuild(app);
     });

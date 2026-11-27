@@ -80,6 +80,13 @@ pub fn parse_event(report: &[u8]) -> Option<KeyboardEvent> {
     }
 }
 
+/// Returns the battery after a pushed battery event: the pushed %, with the charging state of the last
+/// real reading. The push's flag byte is not decoded (it read 01 at both 71% and 100%), so it cannot say
+/// charging either way; only a GET_POWER answer, which carries the charging bit, changes it.
+pub fn with_pushed_percent(last: Option<Battery>, pushed: Battery) -> Battery {
+    Battery { percent: pushed.percent, is_charging: last.is_some_and(|battery| battery.is_charging) }
+}
+
 impl BatteryProtocol for Bytech {
     fn id(&self) -> &'static str {
         "bytech"
