@@ -6,7 +6,7 @@
 #[cfg(target_os = "macos")]
 fn main() {
     use juicebar_mac::delegate::main_thread;
-    use juicebar_mac::menu_ui::{capture_menu_for_checks, name_gap_for_checks, show_menu};
+    use juicebar_mac::menu_ui::{capture_menu_for_checks, name_gap_for_checks, show_menu, PopupKind};
     use juicebar_shared::demo::sample_devices;
     use juicebar_shared::device::{Battery, DeviceKind};
     use juicebar_shared::settings::{MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
@@ -30,8 +30,8 @@ fn main() {
     devices.push(green);
 
     let menu = NSMenu::new(main_thread());
-    show_menu(&menu, &devices, MENU_FONT_POINTS_DEFAULT);
-    // Command and comma must reach the hidden Settings item while the menu is open.
+    show_menu(&menu, &devices, MENU_FONT_POINTS_DEFAULT, PopupKind::Devices);
+    // Command and comma must reach the hidden Settings item while the devices popup is open.
     let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode(
         NSEventType::KeyDown,
         NSPoint::ZERO,
@@ -52,9 +52,17 @@ fn main() {
         println!("{points} pt: menu {width} pt wide, gap after the longest name {gap} pt (least allowed {least})");
         assert!(gap >= least);
         for (theme, is_dark) in [("light", false), ("dark", true)] {
+            // The hover card: the devices popup in a window of its own.
+            let card = format!("{output}/card_{points}pt_{theme}.png");
+            assert!(juicebar_mac::menu_ui::capture_card_for_checks(&devices, points, &card, is_dark));
+            // The actions popup a right click opens: Settings and Quit, plain and with Settings selected.
+            for (suffix, highlight) in [("", None), ("_hover", Some(1))] {
+                let path = format!("{output}/actions_{points}pt_{theme}{suffix}.png");
+                assert!(capture_menu_for_checks(&devices, points, PopupKind::Actions, &path, is_dark, highlight));
+            }
             for (suffix, highlight) in [("", None), ("_hover", Some(2))] {
                 let path = format!("{output}/menu_{points}pt_{theme}{suffix}.png");
-                assert!(capture_menu_for_checks(&devices, points, &path, is_dark, highlight));
+                assert!(capture_menu_for_checks(&devices, points, PopupKind::Devices, &path, is_dark, highlight));
             }
             let path = format!("{output}/menu_{points}pt_{theme}.png");
             let data = NSData::dataWithContentsOfFile(&NSString::from_str(&path)).expect("png");
@@ -96,7 +104,7 @@ fn main() {
     // With no devices the note must show whole: its ink ends before the menu's right padding.
     for points in [MENU_FONT_POINTS_MIN, MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX] {
         let path = format!("{output}/menu_empty_{points}pt.png");
-        assert!(capture_menu_for_checks(&[], points, &path, true, None));
+        assert!(capture_menu_for_checks(&[], points, PopupKind::Devices, &path, true, None));
         let data = NSData::dataWithContentsOfFile(&NSString::from_str(&path)).expect("png");
         let image = NSBitmapImageRep::imageRepWithData(&data).expect("bitmap");
         let (wide, high) = (image.pixelsWide(), image.pixelsHigh());

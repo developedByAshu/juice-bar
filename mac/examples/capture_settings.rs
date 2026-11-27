@@ -27,11 +27,11 @@ fn main() {
 
     for (theme, is_dark) in [("dark", true), ("light", false)] {
         settings_ui::preview_theme(is_dark);
-        for (page, name) in ["general", "devices", "reset", "details"].iter().enumerate() {
+        for (page, name) in ["general", "appearance", "devices", "advanced", "about"].iter().enumerate() {
             settings_ui::show_page_for_checks(page);
             assert!(settings_ui::capture_to(&path(&format!("settings_{name}_{theme}"))));
         }
-        settings_ui::show_page_for_checks(2);
+        settings_ui::show_page_for_checks(3);
         assert!(settings_ui::click_for_checks("ask_reset"));
         assert!(settings_ui::capture_to(&path(&format!("settings_reset_confirm_{theme}"))));
         assert!(settings_ui::click_for_checks("cancel_reset"));
@@ -40,20 +40,29 @@ fn main() {
     settings_ui::preview_theme(false);
     // Clicks change the window's own settings even with no app running behind it.
     assert!(settings_ui::click_for_checks("page:0"));
-    assert!(settings_ui::click_for_checks("poll:10"));
+    assert!(settings_ui::click_for_checks("poll:6"));
+    assert!(settings_ui::click_for_checks("page:1"));
     assert!(settings_ui::click_for_checks("percent"));
+    assert!(settings_ui::click_for_checks("menu_font:10"));
+    assert!(settings_ui::click_for_checks("page:3"));
+    assert!(settings_ui::click_for_checks("hover:1"));
+    assert!(settings_ui::click_for_checks("click:1"));
     let changed = settings_ui::settings_for_checks().expect("open");
-    assert_eq!(changed.poll_minutes, 10);
+    assert_eq!(changed.poll_minutes, 6);
     assert!(changed.shows_percent_in_icon);
-    assert!(settings_ui::click_for_checks("page:2"));
+    assert_eq!(changed.menu_font_points, 10);
+    assert_eq!(changed.hover_action.number(), 1);
+    assert_eq!(changed.click_action.number(), 2);
+    assert!(settings_ui::capture_to(&path("settings_advanced_chosen_light")));
     assert!(settings_ui::click_for_checks("ask_reset"));
     assert!(settings_ui::click_for_checks("confirm_reset"));
     assert!(settings_ui::is_reset_done_for_checks());
     let reset = settings_ui::settings_for_checks().expect("open");
     assert_eq!(reset.poll_minutes, Settings::default().poll_minutes);
     assert!(reset.renames.is_empty() && reset.hidden.is_empty() && !reset.shows_percent_in_icon);
+    assert!(reset.hover_action.number() == 0 && reset.click_action.number() == 0 && reset.menu_font_points == 9);
     assert!(settings_ui::capture_to(&path("settings_reset_done_light")));
-    settings_ui::show_page_for_checks(1);
+    settings_ui::show_page_for_checks(2);
     assert!(settings_ui::capture_to(&path("settings_devices_after_reset_light")));
     let _ = std::fs::remove_dir_all(&home);
     println!("captured to {output}");
