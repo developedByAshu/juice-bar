@@ -104,6 +104,8 @@ pub struct App {
     last_read: HashMap<String, Instant>,
     /// Keyboards whose dongle said they fell asleep; these show as asleep at once, without the grace.
     asleep: Vec<(u16, u16)>,
+    /// The % each sleeping keyboard had when its dongle said it fell asleep, shown again on its wake.
+    slept: HashMap<String, Battery>,
 }
 
 thread_local! {
@@ -306,6 +308,7 @@ impl App {
             is_scan_wanted: false,
             last_read: HashMap::new(),
             asleep: Vec::new(),
+            slept: HashMap::new(),
         };
         create_status_icon(window);
         crate::menu_ui::set_menu_owner(window);
@@ -373,8 +376,24 @@ impl App {
                 self.asleep.push((vendor_id, product_id));
             }
             if event == KeyboardEvent::Awake {
+                // The battery cannot change while asleep, so the % from before sleep shows again at once;
+                // a read right after waking can miss, and the next poll is minutes away.
+                for device in self.devices.borrow_mut().iter_mut().filter(|device| device.vendor_id == vendor_id && device.product_id == product_id && device.battery.is_none()) {
+                    if let Some(battery) = self.slept.remove(&device.id) {
+                        device.battery = Some(battery);
+                        self.last_read.insert(device.id.clone(), Instant::now());
+                        changed = true;
+                    }
+                }
                 self.refresh();
                 continue;
+            }
+            if event == KeyboardEvent::Asleep {
+                for device in self.devices.borrow().iter().filter(|device| device.vendor_id == vendor_id && device.product_id == product_id) {
+                    if let Some(battery) = device.battery {
+                        self.slept.insert(device.id.clone(), battery);
+                    }
+                }
             }
             let battery = match event {
                 KeyboardEvent::Battery(battery) => Some(battery),
