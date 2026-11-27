@@ -10,7 +10,8 @@ use crate::util::{copy_into, scale, to_wide};
 use juicebar_shared::device::{Connection, Device};
 use juicebar_shared::names::short_name;
 use juicebar_shared::tone::{tone_for_percent, Tone};
-use std::cell::RefCell;
+use juicebar_shared::settings::{MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
+use std::cell::{Cell, RefCell};
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows_sys::Win32::Graphics::Gdi::{
@@ -45,7 +46,10 @@ const LABEL_LEFT: i32 = 40;
 const PERCENT_GAP: i32 = 24;
 const DOT_RADIUS: i32 = 4;
 const HOVER_RADIUS: i32 = 5;
-const SCREEN_MARGIN: i32 = 12;
+// The flyout is 80% of NetSpeedGauge's popup at the default text size (his call, 28 Nov).
+const MENU_SIZE: f32 = 0.8;
+// No gap: the flyout opens flush against the taskbar, as NetSpeedGauge's popup does.
+const SCREEN_MARGIN: i32 = 0;
 const TOOLTIP_WIDTH: i32 = 320;
 // A click on the tray icon while the flyout is open first closes it; this stops that click reopening it.
 const REOPEN_GUARD: Duration = Duration::from_millis(300);
@@ -148,12 +152,14 @@ struct Fonts {
 }
 
 impl Fonts {
+    /// Rows use the menu text size (9 pt by default), the header and shortcuts 1 pt less, icons in step.
     fn new(dpi: u32) -> Self {
+        let points = menu_points() as f32;
         Self {
-            body: create_font(UI_FONT, 10.0, 400, dpi),
-            strong: create_font(UI_FONT_STRONG, 10.0, 400, dpi),
-            small: create_font(UI_FONT, 9.0, 400, dpi),
-            icon: create_font(ICON_FONT, 11.0, 400, dpi),
+            body: create_font(UI_FONT, points, 400, dpi),
+            strong: create_font(UI_FONT_STRONG, points, 400, dpi),
+            small: create_font(UI_FONT, points - 1.0, 400, dpi),
+            icon: create_font(ICON_FONT, 11.0 * menu_scale(menu_points()), 400, dpi),
         }
     }
 }
@@ -192,6 +198,7 @@ thread_local! {
     static LAST_CLOSED: RefCell<Option<Instant>> = const { RefCell::new(None) };
     static OWNER: RefCell<HWND> = const { RefCell::new(std::ptr::null_mut()) };
     static LISTENING: RefCell<bool> = const { RefCell::new(false) };
+    static MENU_POINTS: Cell<u32> = const { Cell::new(MENU_FONT_POINTS_DEFAULT) };
 }
 
 /// Sets the window that receives the flyout's actions as WM_APP_MENU_ACTION.
@@ -209,10 +216,35 @@ pub fn is_menu_open() -> bool {
     FLYOUT.with(|cell| cell.borrow().is_some())
 }
 
-/// Returns the flyout's height in pixels at 100% scaling for a number of device rows.
-pub fn menu_height(device_rows: usize) -> i32 {
+/// Sets the menu text size in points, from Settings; the whole flyout's geometry follows it.
+pub fn set_menu_text_points(points: u32) {
+    MENU_POINTS.with(|cell| cell.set(points.clamp(MENU_FONT_POINTS_MIN, MENU_FONT_POINTS_MAX)));
+}
+
+fn menu_points() -> u32 {
+    MENU_POINTS.with(Cell::get)
+}
+
+/// Returns how much of NetSpeedGauge's size the flyout uses: 80% at the default text size, growing with it.
+pub fn menu_scale(points: u32) -> f32 {
+    MENU_SIZE * points as f32 / MENU_FONT_POINTS_DEFAULT as f32
+}
+
+/// Scales one of NetSpeedGauge's lengths by the menu scale and the screen scaling.
+fn unit(value: i32, dpi: u32) -> i32 {
+    (value as f32 * menu_scale(menu_points()) * dpi as f32 / 96.0).round() as i32
+}
+
+/// Returns the flyout's height in pixels at 100% scaling for a number of device rows and a text size.
+pub fn menu_height(device_rows: usize, points: u32) -> i32 {
     let rows = device_rows.max(1) as i32;
-    SUMMARY_HEIGHT + PADDING + rows * ROW_HEIGHT + DIVIDER_HEIGHT + 2 * ROW_HEIGHT + PADDING
+    let total = SUMMARY_HEIGHT + PADDING + rows * ROW_HEIGHT + DIVIDER_HEIGHT + 2 * ROW_HEIGHT + PADDING;
+    (total as f32 * menu_scale(points)).round() as i32
+}
+
+/// Returns the y that centres a line of text in a row.
+fn centred(canvas: &Canvas, rect: &RECT, font: HFONT) -> i32 {
+    rect.top + (rect.bottom - rect.top - canvas.text_height(font)) / 2
 }
 
 /// Returns the text of a row's % column, or None for the no-signal icon or an empty column.
@@ -239,25 +271,25 @@ fn column_widths(canvas: &Canvas, fonts: &Fonts, rows: &[DeviceRow], dpi: u32) -
     .into_iter()
     .max()
     .unwrap_or(0);
-    let width = scale(LABEL_LEFT, dpi) + labels + scale(PERCENT_GAP, dpi) + right_column + scale(SIDE, dpi);
-    (names, width.max(scale(MIN_WIDTH, dpi)))
+    let width = unit(LABEL_LEFT, dpi) + labels + unit(PERCENT_GAP, dpi) + right_column + unit(SIDE, dpi);
+    (names, width.max(unit(MIN_WIDTH, dpi)))
 }
 
 /// Returns the y position of a row: devices first, then Settings and Quit under a divider.
 fn row_top(row: usize, device_rows: usize, dpi: u32) -> i32 {
     let device_rows = device_rows.max(1);
     let divider = if row >= device_rows { DIVIDER_HEIGHT } else { 0 };
-    scale(SUMMARY_HEIGHT + PADDING + row as i32 * ROW_HEIGHT + divider, dpi)
+    unit(SUMMARY_HEIGHT + PADDING + row as i32 * ROW_HEIGHT + divider, dpi)
 }
 
 /// Returns each target and its rectangle, at the flyout's scaling.
 fn layout(flyout: &Flyout, width: i32) -> Vec<(Target, RECT)> {
     let dpi = flyout.dpi;
     let count = flyout.rows.len();
-    let (left, right) = (scale(PADDING, dpi), width - scale(PADDING, dpi));
+    let (left, right) = (unit(PADDING, dpi), width - unit(PADDING, dpi));
     let rect = |row: usize| {
         let top = row_top(row, count, dpi);
-        RECT { left, top, right, bottom: top + scale(ROW_HEIGHT, dpi) }
+        RECT { left, top, right, bottom: top + unit(ROW_HEIGHT, dpi) }
     };
     let mut targets: Vec<(Target, RECT)> = (0..count).map(|index| (Target::Device(index), rect(index))).collect();
     let first_footer = count.max(1);
@@ -298,7 +330,7 @@ pub fn fit_text(canvas: &Canvas, text: &str, font: HFONT, max_width: i32) -> Str
 
 fn draw_focus_ring(canvas: &mut Canvas, theme: &Theme, rect: &RECT, dpi: u32) {
     let thickness = scale(2, dpi) as f32;
-    canvas.round_outline(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, scale(HOVER_RADIUS + 1, dpi) as f32, thickness, theme.text, 1.0);
+    canvas.round_outline(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, unit(HOVER_RADIUS + 1, dpi) as f32, thickness, theme.text, 1.0);
 }
 
 fn paint(flyout: &Flyout, canvas: &mut Canvas) {
@@ -307,26 +339,27 @@ fn paint(flyout: &Flyout, canvas: &mut Canvas) {
     let fonts = &flyout.fonts;
     let width = canvas.width();
     canvas.clear(theme.surface, 1.0);
-    let divider_x = scale(PADDING, dpi);
+    let divider_x = unit(PADDING, dpi);
     let divider_width = width - divider_x * 2;
     let divider_height = scale(1, dpi).max(1);
 
     // The summary line, as NetSpeedGauge's "Today" line: the app on the left, the lowest % on the right.
-    canvas.text(scale(SIDE, dpi), scale(9, dpi), "Juice Bar", fonts.small, theme.muted, Align::Left);
+    let summary = RECT { left: 0, top: 0, right: width, bottom: unit(SUMMARY_HEIGHT, dpi) };
+    canvas.text(unit(SIDE, dpi), centred(canvas, &summary, fonts.small), "Juice Bar", fonts.small, theme.muted, Align::Left);
     let lowest = flyout.rows.iter().filter_map(|row| match &row.end {
         RowEnd::Percent { text, tone, .. } => text.trim_end_matches('%').parse::<u8>().ok().map(|percent| (percent, *tone)),
         _ => None,
     }).min_by_key(|(percent, _)| *percent);
     if let Some((percent, tone)) = lowest {
-        canvas.text(width - scale(SIDE, dpi), scale(8, dpi), &format!("Lowest {percent}%"), fonts.strong, tone_color(tone, &theme), Align::Right);
+        canvas.text(width - unit(SIDE, dpi), centred(canvas, &summary, fonts.strong), &format!("Lowest {percent}%"), fonts.strong, tone_color(tone, &theme), Align::Right);
     }
-    canvas.round_rect(divider_x, scale(SUMMARY_HEIGHT, dpi), divider_width, divider_height, 0.0, theme.border, 1.0);
+    canvas.round_rect(divider_x, unit(SUMMARY_HEIGHT, dpi), divider_width, divider_height, 0.0, theme.border, 1.0);
 
     let targets = layout(flyout, width);
     let (name_column, _) = column_widths(canvas, fonts, &flyout.rows, dpi);
     let draw_wash = |canvas: &mut Canvas, rect: &RECT| {
         let hover = mix(theme.surface, theme.text, 0.09);
-        canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, scale(HOVER_RADIUS, dpi) as f32, hover, 1.0);
+        canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, unit(HOVER_RADIUS, dpi) as f32, hover, 1.0);
     };
     for (target, rect) in &targets {
         let is_lit = flyout.hovered == Some(*target) || flyout.focused == Some(*target);
@@ -336,48 +369,48 @@ fn paint(flyout: &Flyout, canvas: &mut Canvas) {
         if flyout.focused == Some(*target) {
             draw_focus_ring(canvas, &theme, rect, dpi);
         }
-        let label_x = scale(LABEL_LEFT, dpi);
+        let label_x = unit(LABEL_LEFT, dpi);
         match target {
             Target::Device(index) => {
                 let row = &flyout.rows[*index];
                 let middle = rect.top + (rect.bottom - rect.top) / 2;
-                let dot_x = scale(SIDE + DOT_RADIUS + 2, dpi);
-                let radius = scale(DOT_RADIUS, dpi);
+                let dot_x = unit(SIDE + DOT_RADIUS + 2, dpi);
+                let radius = unit(DOT_RADIUS, dpi);
                 match row.dot {
                     Some(tone) => canvas.circle(dot_x, middle, radius, tone_color(tone, &theme)),
                     None => canvas.round_outline(dot_x - radius, middle - radius, radius * 2, radius * 2, radius as f32, 1.5, theme.muted, 1.0),
                 }
                 let name_color = if row.is_dimmed { theme.muted } else { theme.text };
                 let name = fit_text(canvas, &row.name, fonts.body, name_column);
-                canvas.text(label_x, rect.top + scale(7, dpi), &name, fonts.body, name_color, Align::Left);
-                let right = width - scale(SIDE, dpi);
+                canvas.text(label_x, centred(canvas, rect, fonts.body), &name, fonts.body, name_color, Align::Left);
+                let right = width - unit(SIDE, dpi);
                 match &row.end {
                     RowEnd::Percent { tone, .. } => {
                         let text = percent_text(&row.end).unwrap_or_default();
-                        canvas.text(right, rect.top + scale(7, dpi), &text, fonts.strong, tone_color(*tone, &theme), Align::Right);
+                        canvas.text(right, centred(canvas, rect, fonts.strong), &text, fonts.strong, tone_color(*tone, &theme), Align::Right);
                     }
-                    RowEnd::NotConnected => canvas.text(right, rect.top + scale(8, dpi), ICON_NOT_CONNECTED, fonts.icon, theme.muted, Align::Right),
+                    RowEnd::NotConnected => canvas.text(right, centred(canvas, rect, fonts.icon), ICON_NOT_CONNECTED, fonts.icon, theme.muted, Align::Right),
                     RowEnd::Actions => {}
                 }
             }
             Target::Settings | Target::Quit => {
                 let (icon, label) = if *target == Target::Settings { (ICON_SETTINGS, "Settings") } else { (ICON_QUIT, "Quit") };
                 let icon_color = if is_lit { theme.text } else { theme.muted };
-                canvas.text(scale(SIDE, dpi), rect.top + scale(8, dpi), icon, fonts.icon, icon_color, Align::Left);
+                canvas.text(unit(SIDE, dpi), centred(canvas, rect, fonts.icon), icon, fonts.icon, icon_color, Align::Left);
                 let font = if is_lit { fonts.strong } else { fonts.body };
-                canvas.text(label_x, rect.top + scale(7, dpi), label, font, theme.text, Align::Left);
+                canvas.text(label_x, centred(canvas, rect, font), label, font, theme.text, Align::Left);
                 // The shortcut ends on the same right edge as every % and icon above it.
                 let shortcut = if *target == Target::Settings { SHORTCUT_SETTINGS } else { SHORTCUT_QUIT };
-                canvas.text(width - scale(SIDE, dpi), rect.top + scale(8, dpi), shortcut, fonts.small, theme.muted, Align::Right);
+                canvas.text(width - unit(SIDE, dpi), centred(canvas, rect, fonts.small), shortcut, fonts.small, theme.muted, Align::Right);
             }
         }
     }
     if flyout.rows.is_empty() {
         let top = row_top(0, 0, dpi);
-        canvas.text(scale(SIDE, dpi), top + scale(7, dpi), EMPTY_TEXT, fonts.body, theme.muted, Align::Left);
+        canvas.text(unit(SIDE, dpi), centred(canvas, &RECT { left: 0, top, right: width, bottom: top + unit(ROW_HEIGHT, dpi) }, fonts.body), EMPTY_TEXT, fonts.body, theme.muted, Align::Left);
     }
     let settings_top = row_top(flyout.rows.len().max(1), flyout.rows.len(), dpi);
-    canvas.round_rect(divider_x, settings_top - scale(DIVIDER_HEIGHT / 2 + 1, dpi), divider_width, divider_height, 0.0, theme.border, 1.0);
+    canvas.round_rect(divider_x, settings_top - unit(DIVIDER_HEIGHT / 2 + 1, dpi), divider_width, divider_height, 0.0, theme.border, 1.0);
 }
 
 impl Theme {
@@ -419,7 +452,7 @@ fn create_row_tooltips(window: HWND, rows: &[DeviceRow], dpi: u32) -> HWND {
             info.uFlags = TTF_SUBCLASS;
             info.hwnd = window;
             info.uId = index + 1;
-            info.rect = RECT { left: 0, top, right: width, bottom: top + scale(ROW_HEIGHT, dpi) };
+            info.rect = RECT { left: 0, top, right: width, bottom: top + unit(ROW_HEIGHT, dpi) };
             info.lpszText = text.as_mut_ptr();
             SendMessageW(tooltip, TTM_ADDTOOLW, 0, std::ptr::from_ref(&info) as isize);
         }
@@ -682,7 +715,7 @@ fn flyout_bounds(anchor: RECT, rows: &[DeviceRow]) -> (i32, i32, i32, i32, u32) 
         GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y);
         let dpi = dpi_x.max(96);
         let (_, width) = column_widths(&Canvas::new(1, 1), &Fonts::new(dpi), rows, dpi);
-        let height = scale(menu_height(rows.len()), dpi);
+        let height = scale(menu_height(rows.len(), menu_points()), dpi);
         let (x, y) = place_flyout(anchor, info.rcMonitor, info.rcWork, width, height, scale(SCREEN_MARGIN, dpi));
         (x, y, width, height, dpi)
     }

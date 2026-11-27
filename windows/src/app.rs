@@ -5,7 +5,7 @@
 //! it runs on one long-lived read thread that owns the only HidApi and posts results back to the UI thread.
 
 use crate::bluetooth::{bluetooth_devices, remembered_names_by_kind};
-use crate::menu_ui::{close_menu, is_menu_open, refresh_menu, show_menu, take_menu_action, MenuAction};
+use crate::menu_ui::{close_menu, is_menu_open, refresh_menu, set_menu_text_points, show_menu, take_menu_action, MenuAction};
 use crate::messages::WM_APP_SCAN_DONE;
 use crate::settings_ui::{close_settings, open_settings, refresh_settings};
 use crate::status_icon::{create_status_icon, set_tooltip, update_status_icon};
@@ -265,6 +265,7 @@ impl App {
         update_status_icon(icon_tone(&visible), lowest_percent(&visible), shows_percent);
         set_tooltip(&tooltip_text(&visible));
         if is_menu_open() {
+            set_menu_text_points(self.settings.borrow().menu_font_points);
             refresh_menu(&visible);
         }
         refresh_settings();
@@ -350,6 +351,7 @@ impl App {
     /// Opens or closes the flyout from the tray icon.
     pub fn toggle_menu(&self) {
         let devices = self.visible_devices();
+        set_menu_text_points(self.settings.borrow().menu_font_points);
         show_menu(&devices);
     }
 

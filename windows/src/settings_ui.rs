@@ -10,7 +10,7 @@ use crate::startup;
 use crate::theme::{apply_window_look, current_theme, draw_made_with_love, on_theme_change, tone_color, Backdrop, Theme, GREEN, ICON_FONT, UI_FONT, UI_FONT_STRONG};
 use crate::util::{scale, to_wide};
 use juicebar_shared::device::{Device, NameSource};
-use juicebar_shared::settings::Settings;
+use juicebar_shared::settings::{Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
 use juicebar_shared::tone::tone_for_percent;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -101,6 +101,8 @@ enum Control {
     Nav(Page),
     PollLess,
     PollMore,
+    MenuTextLess,
+    MenuTextMore,
     PercentToggle,
     StartupToggle,
     Reset,
@@ -114,6 +116,7 @@ enum Control {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Setting {
     Poll,
+    MenuText,
     Percent,
     Startup,
     Reset,
@@ -219,6 +222,7 @@ fn page_blocks(state: &Window) -> Vec<Block> {
             Block::Setting(Setting::Poll),
             Block::Section("Tray icon"),
             Block::Setting(Setting::Percent),
+            Block::Setting(Setting::MenuText),
             Block::Section("Startup"),
             Block::Setting(Setting::Startup),
             Block::Section("Reset"),
@@ -310,13 +314,14 @@ fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
     let devices = device_list(state);
     for (block, top) in placed_blocks(state) {
         match block {
-            Block::Setting(Setting::Poll) => {
+            Block::Setting(setting @ (Setting::Poll | Setting::MenuText)) => {
+                let (less, more) = if setting == Setting::Poll { (Control::PollLess, Control::PollMore) } else { (Control::MenuTextLess, Control::MenuTextMore) };
                 let size = scale(CONTROL_HEIGHT, dpi);
                 let button_top = top + scale(10, dpi);
                 let plus_x = right - size;
                 let minus_x = plus_x - scale(STEPPER_VALUE_WIDTH, dpi) - size;
-                controls.push((Control::PollLess, RECT { left: minus_x, top: button_top, right: minus_x + size, bottom: button_top + size }));
-                controls.push((Control::PollMore, RECT { left: plus_x, top: button_top, right: plus_x + size, bottom: button_top + size }));
+                controls.push((less, RECT { left: minus_x, top: button_top, right: minus_x + size, bottom: button_top + size }));
+                controls.push((more, RECT { left: plus_x, top: button_top, right: plus_x + size, bottom: button_top + size }));
             }
             // As in NetSpeedGauge, a switch row reacts anywhere on the row.
             Block::Setting(Setting::Percent) => controls.push((Control::PercentToggle, row(top))),
@@ -456,9 +461,9 @@ fn draw_focus(canvas: &mut Canvas, theme: &Theme, rect: &RECT, dpi: u32) {
 }
 
 /// Draws NetSpeedGauge's minus and plus buttons with the value between them.
-fn draw_stepper(canvas: &mut Canvas, state: &Window, less: &RECT, more: &RECT, value: &str, can_less: bool, can_more: bool) {
+fn draw_stepper(canvas: &mut Canvas, state: &Window, controls: (Control, Control), less: &RECT, more: &RECT, value: &str, can_less: bool, can_more: bool) {
     let (theme, dpi) = (state.theme, state.dpi);
-    for (rect, icon, control, is_enabled) in [(less, ICON_MINUS, Control::PollLess, can_less), (more, ICON_PLUS, Control::PollMore, can_more)] {
+    for (rect, icon, control, is_enabled) in [(less, ICON_MINUS, controls.0, can_less), (more, ICON_PLUS, controls.1, can_more)] {
         let (size, radius) = (rect.right - rect.left, scale(CARD_RADIUS, dpi) as f32);
         let center = rect.left + size / 2;
         if is_enabled {
@@ -505,6 +510,7 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                 // The label and hint run up to the row's control, with NetSpeedGauge's 14 px gap.
                 let control_left = match setting {
                     Setting::Poll => rect_of(Control::PollLess).map_or(right, |rect| rect.left),
+                    Setting::MenuText => rect_of(Control::MenuTextLess).map_or(right, |rect| rect.left),
                     Setting::Reset => rect_of(Control::Reset).map_or(right, |rect| rect.left),
                     Setting::Percent | Setting::Startup => toggle_rect(right, top, dpi).left,
                 };
@@ -514,7 +520,14 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                         row_label(canvas, state, text_x, top, "Check batteries every", "Juice Bar sleeps in between, so it costs no power", label_room);
                         if let (Some(less), Some(more)) = (rect_of(Control::PollLess), rect_of(Control::PollMore)) {
                             let minutes = settings.poll_minutes;
-                            draw_stepper(canvas, state, &less, &more, &format!("{minutes} min"), minutes > MIN_POLL_MINUTES, minutes < MAX_POLL_MINUTES);
+                            draw_stepper(canvas, state, (Control::PollLess, Control::PollMore), &less, &more, &format!("{minutes} min"), minutes > MIN_POLL_MINUTES, minutes < MAX_POLL_MINUTES);
+                        }
+                    }
+                    Setting::MenuText => {
+                        row_label(canvas, state, text_x, top, "Menu text size", "The tray menu grows and shrinks with it", label_room);
+                        if let (Some(less), Some(more)) = (rect_of(Control::MenuTextLess), rect_of(Control::MenuTextMore)) {
+                            let points = settings.menu_font_points;
+                            draw_stepper(canvas, state, (Control::MenuTextLess, Control::MenuTextMore), &less, &more, &format!("{points} pt"), points > MENU_FONT_POINTS_MIN, points < MENU_FONT_POINTS_MAX);
                         }
                     }
                     Setting::Percent | Setting::Startup => {
@@ -655,6 +668,16 @@ fn activate(control: Control) {
                     let mut settings = state.settings.borrow_mut();
                     let minutes = settings.poll_minutes;
                     settings.poll_minutes = if control == Control::PollLess { minutes.saturating_sub(1).max(MIN_POLL_MINUTES) } else { (minutes + 1).min(MAX_POLL_MINUTES) };
+                }
+                save_and_announce(state);
+            });
+        }
+        Control::MenuTextLess | Control::MenuTextMore => {
+            with_window(|state| {
+                {
+                    let mut settings = state.settings.borrow_mut();
+                    let points = settings.menu_font_points;
+                    settings.menu_font_points = if control == Control::MenuTextLess { points.saturating_sub(1).max(MENU_FONT_POINTS_MIN) } else { (points + 1).min(MENU_FONT_POINTS_MAX) };
                 }
                 save_and_announce(state);
             });
