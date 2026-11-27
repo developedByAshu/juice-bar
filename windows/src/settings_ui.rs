@@ -4,6 +4,7 @@
 
 use crate::canvas::{create_font, mix, Align, Canvas};
 use crate::confirm_sheet::{confirm_click, confirm_hover, confirm_key, dismiss_confirm, is_confirm_open, paint_confirm, show_confirm, SheetFonts};
+use crate::app::with_renames;
 use crate::glyph::glass_image;
 use crate::menu_ui::{connection_label, fit_text};
 use crate::messages::WM_APP_SETTINGS_CHANGED;
@@ -21,7 +22,7 @@ use windows_sys::Win32::Graphics::Gdi::{
     BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, InvalidateRect, SetBkColor, SetTextColor, HBRUSH, HDC, HFONT, PAINTSTRUCT,
 };
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows_sys::Win32::UI::Controls::EM_SETSEL;
+use windows_sys::Win32::UI::Controls::{EM_SETCUEBANNER, EM_SETSEL};
 use windows_sys::Win32::UI::HiDpi::{AdjustWindowRectExForDpi, GetDpiForSystem, GetDpiForWindow};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{GetKeyState, SetFocus, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_TAB, VK_UP};
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
@@ -80,7 +81,11 @@ const RESET_LABEL: &str = "Reset all";
 // The green "Done" line under Reset stays this long after a reset, as on the Mac.
 const RESET_DONE_MS: u32 = 4_000;
 const RESET_DONE_TIMER: usize = 1;
-const RESET_DONE_TEXT: &str = "Done. Every setting is back to how it started";
+const RESET_DONE_TEXT: &str = "Done. Every setting is back to its default.";
+const ICON_DONE: &str = "\u{EC61}";
+// The done line's green, the same as NetSpeedGauge's and the Mac app's.
+const GOOD_DARK: u32 = 0x30D158;
+const GOOD_LIGHT: u32 = 0x248A3D;
 
 /// What Juice Bar does and does not do with data, shown on the About page.
 const PRIVACY_LINES: [&str; 4] = [
@@ -165,7 +170,6 @@ struct Fonts {
     small_icon: HFONT,
     heart: HFONT,
     lock: HFONT,
-    sheet_title: HFONT,
 }
 
 impl Fonts {
@@ -179,7 +183,6 @@ impl Fonts {
             small_icon: create_font(ICON_FONT, 8.0, 400, dpi),
             heart: create_font(ICON_FONT, 9.0, 400, dpi),
             lock: create_font(ICON_FONT, 15.0, 400, dpi),
-            sheet_title: create_font(UI_FONT_STRONG, 12.0, 400, dpi),
         }
     }
 }
@@ -188,7 +191,7 @@ impl Drop for Fonts {
     fn drop(&mut self) {
         // SAFETY: each font was created in new() and is released once here.
         unsafe {
-            for font in [self.body, self.strong, self.small, self.title, self.icon, self.small_icon, self.heart, self.lock, self.sheet_title] {
+            for font in [self.body, self.strong, self.small, self.title, self.icon, self.small_icon, self.heart, self.lock] {
                 DeleteObject(font);
             }
         }
@@ -233,7 +236,12 @@ fn invalidate() {
 
 /// Returns the devices in Settings order: as read, hidden ones included.
 fn device_list(state: &Window) -> Vec<Device> {
-    state.devices.borrow().clone()
+    with_renames(&state.devices.borrow(), &state.settings.borrow())
+}
+
+/// Returns a device's own name, before the user's rename: what an empty rename falls back to.
+fn own_name(state: &Window, id: &str) -> String {
+    state.devices.borrow().iter().find(|device| device.id == id).map(|device| device.name.clone()).unwrap_or_default()
 }
 
 /// Returns the pieces of the current page, top to bottom.
@@ -590,7 +598,9 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                     Setting::Reset => {
                         if state.shows_reset_done {
                             canvas.text(text_x, top + scale(7, dpi), "Every setting", fonts.body, theme.text, Align::Left);
-                            canvas.text(text_x, top + scale(27, dpi), &fit_text(canvas, RESET_DONE_TEXT, fonts.small, label_room), fonts.small, GREEN, Align::Left);
+                            let good = if theme.is_dark { GOOD_DARK } else { GOOD_LIGHT };
+                            canvas.text(text_x, top + scale(29, dpi), ICON_DONE, fonts.small_icon, good, Align::Left);
+                            canvas.text(text_x + scale(14, dpi), top + scale(27, dpi), &fit_text(canvas, RESET_DONE_TEXT, fonts.small, label_room - scale(14, dpi)), fonts.small, good, Align::Left);
                         } else {
                             row_label(canvas, state, text_x, top, "Every setting", "Renames, hidden devices and the check interval", label_room);
                         }
@@ -764,7 +774,8 @@ fn activate(control: Control) {
         }
         Control::Reset => show_confirm(
             "Reset every setting?",
-            "Renames, hidden devices, confirmed Bluetooth names and every choice go back to how they were at install. Start with Windows stays as it is.",
+            "Every choice and rename goes back to how Juice Bar started.
+Start with Windows stays as it is.",
             || {
                 with_window(|state| {
                     // Start with Windows stays as it is: it lives in Windows' own startup list.
@@ -863,7 +874,7 @@ fn draw_segments(canvas: &mut Canvas, state: &Window, controls: &[(Control, RECT
 
 /// The fonts the Reset confirm card draws with: a strong title and the body text.
 fn sheet_fonts(state: &Window) -> SheetFonts {
-    SheetFonts { title: state.fonts.sheet_title, body: state.fonts.body }
+    SheetFonts { title: state.fonts.strong, body: state.fonts.body, small: state.fonts.small, icon: state.fonts.lock }
 }
 
 /// Returns the inside colour of a text box, as Windows 11 draws one: darker than the card in dark mode.
@@ -912,7 +923,10 @@ fn open_rename(index: usize, device: &Device) {
             let width = field.right - field.left - scale(20, dpi);
             let height = text_height;
             let class = to_wide("EDIT");
-            let text = to_wide(&device.name);
+            // The box holds the saved rename, or stays empty with the device's own name in grey as its hint.
+            let rename = state.settings.borrow().renames.get(&device.id).cloned().unwrap_or_default();
+            let text = to_wide(&rename);
+            let hint = to_wide(&own_name(state, &device.id));
             let edit = CreateWindowExW(
                 0,
                 class.as_ptr(),
@@ -929,6 +943,7 @@ fn open_rename(index: usize, device: &Device) {
             );
             SendMessageW(edit, WM_SETFONT, state.fonts.body as usize, 1);
             SendMessageW(edit, EM_SETSEL, 0, -1);
+            SendMessageW(edit, EM_SETCUEBANNER, 1, hint.as_ptr() as isize);
             SetWindowSubclass(edit, Some(edit_proc), EDIT_SUBCLASS, 0);
             SetFocus(edit);
             state.edit = Some((edit, device.id.clone()));
@@ -960,13 +975,7 @@ fn close_rename(keep: bool) {
                     settings.renames.insert(id.clone(), name.to_string());
                 }
             }
-            // The new name shows at once, without waiting for the read that follows.
-            if let Some(device) = state.devices.borrow_mut().iter_mut().find(|device| device.id == id) {
-                if !text.trim().is_empty() {
-                    device.name = text.trim().to_string();
-                    device.name_source = NameSource::UserRename;
-                }
-            }
+            // Devices keep their own names; the rename shows wherever a name is drawn, at once.
             save_and_announce(state);
         });
     }

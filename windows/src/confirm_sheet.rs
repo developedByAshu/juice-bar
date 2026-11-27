@@ -2,21 +2,30 @@
 //! inside the window, like the Mac's sheet, with Cancel and a red Reset as the Mac app has them.
 
 use crate::canvas::{Align, Canvas};
-use crate::theme::{Theme, RED};
+use crate::theme::Theme;
 use crate::util::scale;
 use std::cell::RefCell;
 use windows_sys::Win32::Foundation::RECT;
 use windows_sys::Win32::Graphics::Gdi::HFONT;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_ESCAPE, VK_LEFT, VK_RETURN, VK_RIGHT, VK_SPACE, VK_TAB};
 
-const CARD_WIDTH: i32 = 380;
-const CARD_PADDING: i32 = 24;
-const BUTTON_HEIGHT: i32 = 32;
-const BUTTON_WIDTH: i32 = 112;
-const BUTTON_GAP: i32 = 8;
-const RADIUS: f32 = 8.0;
-const BUTTON_RADIUS: f32 = 6.0;
-const LINE_GAP: i32 = 4;
+// NetSpeedGauge's confirm card, on Mac and Windows alike: the same sizes, words, colours and order.
+const CARD_WIDTH: i32 = 400;
+const CARD_HEIGHT: i32 = 184;
+const CARD_INSET: i32 = 20;
+const TILE: i32 = 40;
+const BUTTON_HEIGHT: i32 = 30;
+const BUTTON_GAP: i32 = 10;
+const RADIUS: i32 = 10;
+const BUTTON_RADIUS: i32 = 6;
+const ICON_RESET: &str = "\u{E72C}";
+const DANGER_DARK: u32 = 0xE5484D;
+const DANGER_LIGHT: u32 = 0xD93A3F;
+
+/// The red of the Reset button and the card's icon.
+pub fn danger_color(theme: &Theme) -> u32 {
+    if theme.is_dark { DANGER_DARK } else { DANGER_LIGHT }
+}
 
 /// The two buttons on the card.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +52,9 @@ thread_local! {
 pub struct SheetFonts {
     pub title: HFONT,
     pub body: HFONT,
+    pub small: HFONT,
+    /// The icon font, large, for the reset icon on its tile.
+    pub icon: HFONT,
 }
 
 /// Opens the card. `on_confirm` runs only when the user picks the confirm button.
@@ -93,22 +105,19 @@ pub fn wrap_text(canvas: &Canvas, text: &str, font: HFONT, width: i32) -> Vec<St
     lines
 }
 
-/// Returns the card and its two buttons for a window size.
+/// Returns the card and its two buttons for a window size: Cancel on the left, the red Reset on the right.
 fn layout(canvas: &Canvas, fonts: &SheetFonts, dpi: u32, sheet: &Sheet) -> (RECT, RECT, RECT, Vec<String>) {
-    let card_width = scale(CARD_WIDTH, dpi).min(canvas.width() - scale(32, dpi));
-    let padding = scale(CARD_PADDING, dpi);
-    let lines = wrap_text(canvas, &sheet.detail, fonts.body, card_width - 2 * padding);
-    let title_height = canvas.text_height(fonts.title);
-    let line_height = canvas.text_height(fonts.body) + scale(LINE_GAP, dpi);
-    let card_height = padding + title_height + scale(12, dpi) + lines.len() as i32 * line_height + scale(20, dpi) + scale(BUTTON_HEIGHT, dpi) + padding;
+    let (card_width, card_height) = (scale(CARD_WIDTH, dpi), scale(CARD_HEIGHT, dpi));
     let left = (canvas.width() - card_width) / 2;
-    let top = (canvas.height() - card_height) / 2;
+    let top = (canvas.height() - card_height) / 2 - scale(20, dpi);
     let card = RECT { left, top, right: left + card_width, bottom: top + card_height };
-    let button_width = scale(BUTTON_WIDTH, dpi);
-    let button_top = card.bottom - padding - scale(BUTTON_HEIGHT, dpi);
-    // Cancel on the left and the red Reset on the right, the Mac's order for a destructive choice.
-    let confirm = RECT { left: card.right - padding - button_width, top: button_top, right: card.right - padding, bottom: button_top + scale(BUTTON_HEIGHT, dpi) };
-    let cancel = RECT { left: confirm.left - scale(BUTTON_GAP, dpi) - button_width, top: button_top, right: confirm.left - scale(BUTTON_GAP, dpi), bottom: confirm.bottom };
+    let lines = sheet.detail.split('\n').map(str::to_string).collect();
+    let button = |label: &str| canvas.text_width(label, fonts.body) + scale(28, dpi);
+    let button_top = card.bottom - scale(CARD_INSET, dpi) - scale(BUTTON_HEIGHT, dpi);
+    let right = card.right - scale(CARD_INSET, dpi);
+    let confirm = RECT { left: right - button(&sheet.confirm_label), top: button_top, right, bottom: button_top + scale(BUTTON_HEIGHT, dpi) };
+    let cancel_right = confirm.left - scale(BUTTON_GAP, dpi);
+    let cancel = RECT { left: cancel_right - button("Cancel"), top: button_top, right: cancel_right, bottom: confirm.bottom };
     (card, confirm, cancel, lines)
 }
 
@@ -118,24 +127,31 @@ pub fn paint_confirm(canvas: &mut Canvas, theme: &Theme, fonts: &SheetFonts, dpi
         let sheet = cell.borrow();
         let Some(sheet) = sheet.as_ref() else { return };
         let (width, height) = (canvas.width(), canvas.height());
-        canvas.round_rect(0, 0, width, height, 0.0, 0x000000, if theme.is_dark { 0.45 } else { 0.3 });
+        let danger = danger_color(theme);
+        canvas.round_rect(0, 0, width, height, 0.0, 0x000000, if theme.is_dark { 0.5 } else { 0.25 });
         let (card, confirm, cancel, lines) = layout(canvas, fonts, dpi, sheet);
-        let padding = scale(CARD_PADDING, dpi);
-        canvas.round_rect(card.left, card.top, card.right - card.left, card.bottom - card.top, RADIUS, theme.card, 1.0);
-        canvas.round_outline(card.left, card.top, card.right - card.left, card.bottom - card.top, RADIUS, 1.0, theme.border, 1.0);
-        canvas.text(card.left + padding, card.top + padding, &sheet.title, fonts.title, theme.text, Align::Left);
-        let mut y = card.top + padding + canvas.text_height(fonts.title) + scale(12, dpi);
-        for line in &lines {
-            canvas.text(card.left + padding, y, line, fonts.body, theme.muted, Align::Left);
-            y += canvas.text_height(fonts.body) + scale(LINE_GAP, dpi);
+        let (card_width, card_height) = (card.right - card.left, card.bottom - card.top);
+        let radius = scale(RADIUS, dpi) as f32;
+        canvas.round_rect(card.left - 1, card.top - 1, card_width + 2, card_height + 2, radius + 1.0, theme.border, 1.0);
+        canvas.round_rect(card.left, card.top, card_width, card_height, radius, theme.card, 1.0);
+        // The reset icon on a red-tinted tile, then the question and "This cannot be undone" beside it.
+        let tile = scale(TILE, dpi);
+        let (tile_x, tile_y) = (card.left + scale(CARD_INSET, dpi), card.top + scale(CARD_INSET, dpi));
+        canvas.round_rect(tile_x, tile_y, tile, tile, scale(8, dpi) as f32, crate::canvas::mix(theme.card, danger, 0.16), 1.0);
+        canvas.text(tile_x + tile / 2, tile_y + (tile - canvas.text_height(fonts.icon)) / 2, ICON_RESET, fonts.icon, danger, Align::Center);
+        let text_x = tile_x + tile + scale(12, dpi);
+        canvas.text(text_x, tile_y + scale(1, dpi), &sheet.title, fonts.title, theme.text, Align::Left);
+        canvas.text(text_x, tile_y + scale(21, dpi), "This cannot be undone", fonts.small, theme.muted, Align::Left);
+        for (position, line) in lines.iter().enumerate() {
+            canvas.text(card.left + scale(CARD_INSET, dpi), card.top + scale(76 + position as i32 * 20, dpi), line, fonts.body, theme.text, Align::Left);
         }
         for (button, rect, label) in [(SheetButton::Confirm, confirm, sheet.confirm_label.as_str()), (SheetButton::Cancel, cancel, "Cancel")] {
             let is_hovered = sheet.hovered == Some(button);
             let (fill, text) = match button {
-                SheetButton::Confirm => (if is_hovered { crate::canvas::mix(RED, 0x000000, 0.12) } else { RED }, 0xFFFFFF),
+                SheetButton::Confirm => (if is_hovered { crate::canvas::mix(danger, 0x000000, 0.12) } else { danger }, 0xFFFFFF),
                 SheetButton::Cancel => (if is_hovered { theme.button_hover } else { theme.button }, theme.text),
             };
-            canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, BUTTON_RADIUS, fill, 1.0);
+            canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, scale(BUTTON_RADIUS, dpi) as f32, fill, 1.0);
             if show_focus && sheet.focused == button {
                 let ring = scale(2, dpi);
                 canvas.round_outline(rect.left - ring - 1, rect.top - ring - 1, rect.right - rect.left + 2 * ring + 2, rect.bottom - rect.top + 2 * ring + 2, 6.0, ring as f32, theme.text, 1.0);
