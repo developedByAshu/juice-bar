@@ -269,3 +269,15 @@ fn a_missed_read_keeps_the_last_percent_unless_the_keyboard_said_it_is_asleep() 
     keep_recent_readings(&mut stale, &old, &mut last_read, &[], start + KEEP_READING_FOR);
     assert_eq!(stale[0].battery, None, "after 30 minutes the old % is dropped");
 }
+
+#[test]
+fn the_rename_shows_when_set_and_the_own_name_comes_back_when_cleared() {
+    use juicebar_windows::app::with_renames;
+    let own = vec![device("Kreo Swarm 75", Some((75, false)), Some("bytech"))];
+    let mut settings = juicebar_shared::settings::Settings::default();
+    settings.renames.insert(own[0].id.clone(), "Desk keyboard".to_string());
+    assert_eq!(with_renames(&own, &settings)[0].name, "Desk keyboard");
+    assert_eq!(own[0].name, "Kreo Swarm 75", "the read keeps the device's own name");
+    settings.renames.clear();
+    assert_eq!(with_renames(&own, &settings)[0].name, "Kreo Swarm 75", "no rename falls back to the own name");
+}
