@@ -1,6 +1,7 @@
 use juicebar_shared::device::{Battery, Connection, Device, DeviceKind, NameSource};
 use juicebar_shared::names::{resolve_name, NameCandidates};
 use juicebar_shared::protocols::bytech::{build_request, parse_power_answer, Bytech};
+use juicebar_shared::protocols::yuandaxin::{self, Yuandaxin};
 use juicebar_shared::protocols::{BatteryProtocol, Reading};
 use juicebar_shared::report::report_url;
 use juicebar_shared::settings::{Settings, MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
@@ -127,6 +128,22 @@ fn bytech_rejects_a_corrupt_answer_and_reports_offline_on_silence() {
     assert_eq!(parse_power_answer(&corrupt), None);
     let mut silent = ReplayTransport::from_fixture("W 13 4a 01 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 5e");
     assert_eq!(Bytech.read_battery(&mut silent).unwrap(), Reading::DeviceOffline);
+}
+
+#[test]
+fn yuandaxin_reads_the_recorded_xs_flow_status() {
+    let mut transport = ReplayTransport::from_fixture(&fixture("yuandaxin_xsflow_status.txt"));
+    assert_eq!(Yuandaxin.read_battery(&mut transport).unwrap(), Reading::Battery(Battery { percent: 50, is_charging: false }));
+    assert!(transport.is_finished());
+}
+
+#[test]
+fn yuandaxin_ignores_other_reports_and_stays_silent_without_a_status() {
+    assert_eq!(yuandaxin::parse_status(&[0x04, 0x01, 0x05, 0x01, 0x32]), None);
+    assert_eq!(yuandaxin::parse_status(&[0x05, 0x01, 0x04, 0x01, 0x32]), None);
+    assert_eq!(yuandaxin::parse_status(&[0x04, 0x01, 0x04, 0x01, 0x00]), None);
+    let mut silent = ReplayTransport::from_fixture("");
+    assert_eq!(Yuandaxin.read_battery(&mut silent).unwrap(), Reading::NoAnswer);
 }
 
 #[test]
