@@ -1,5 +1,5 @@
 //! The native menu under the battery. Name on the left; connection and % on the right, in the tone colour.
-//! Unknown devices get a submenu with Report and Try to detect; known ones show Report while ⌥ is held.
+//! A click on an unknown device runs Try to detect; every row shows Report while ⌥ is held.
 
 use crate::delegate::{delegate, main_thread};
 use crate::theme::tone_color;
@@ -16,9 +16,10 @@ use objc2_app_kit::{
 };
 use objc2_foundation::{NSArray, NSDictionary, NSMutableAttributedString, NSRange, NSString};
 
-/// Where the connection label and the % end, in points from the row's text start.
-const CONNECTION_TAB: f64 = 190.0;
-const PERCENT_TAB: f64 = 240.0;
+/// Where the % ends, in points from the row's text start. The connection type lives in the tooltip.
+const PERCENT_TAB: f64 = 136.0;
+/// Row text one step under the menu default, so the menu stays narrow.
+const ROW_FONT_POINTS: f64 = 12.0;
 /// Shown in place of the % when a known device is off or out of range; the words stay in the tooltip.
 const NOT_CONNECTED_SYMBOL: &str = "antenna.radiowaves.left.and.right.slash";
 const NOT_CONNECTED_TEXT: &str = "Not connected";
@@ -53,30 +54,27 @@ fn color_range(text: &NSMutableAttributedString, color: &NSColor, start: usize, 
     unsafe { text.addAttribute_value_range(NSForegroundColorAttributeName, color.as_ref(), NSRange::new(start, length)) };
 }
 
-/// Builds the row's styled title: name, then right-aligned connection and %.
+/// Builds the row's styled title: name, then the right-aligned %.
 fn row_title(device: &Device) -> Retained<NSMutableAttributedString> {
-    let connection = connection_label(device.connection);
     let percent = percent_label(device);
     let name = short_name(&device.name);
-    let plain = format!("{name}\t{connection}\t{percent}");
+    let plain = format!("{name}\t{percent}");
     let text = NSMutableAttributedString::initWithString(NSMutableAttributedString::alloc(), &NSString::from_str(&plain));
     let whole = NSRange::new(0, utf16_length(&plain));
     let style = NSMutableParagraphStyle::new();
     let no_options = NSDictionary::new();
     // SAFETY: an empty options dictionary is valid for a text tab.
-    let tabs = NSArray::from_retained_slice(&[CONNECTION_TAB, PERCENT_TAB].map(|location| unsafe {
+    let tabs = NSArray::from_retained_slice(&[PERCENT_TAB].map(|location| unsafe {
         NSTextTab::initWithTextAlignment_location_options(NSTextTab::alloc(), NSTextAlignment::Right, location, &no_options)
     }));
     style.setTabStops(Some(&tabs));
-    let font = NSFont::menuFontOfSize(0.0);
+    let font = NSFont::menuFontOfSize(ROW_FONT_POINTS);
     // SAFETY: AppKit's own attribute names with the value types they expect.
     unsafe {
         text.addAttribute_value_range(NSParagraphStyleAttributeName, style.as_ref(), whole);
         text.addAttribute_value_range(NSFontAttributeName, font.as_ref(), whole);
     }
-    let connection_start = utf16_length(&name) + 1;
-    color_range(&text, &NSColor::secondaryLabelColor(), connection_start, utf16_length(connection));
-    let percent_start = connection_start + utf16_length(connection) + 1;
+    let percent_start = utf16_length(&name) + 1;
     let percent_color = match device.battery {
         Some(battery) if device.connection != Connection::Usb && !battery.is_charging => tone_color(tone_for_percent(battery.percent)),
         Some(_) => NSColor::labelColor(),
@@ -114,21 +112,24 @@ fn action_item(title: &str, action: objc2::runtime::Sel, key: &str, tag: isize) 
     item
 }
 
-/// Builds one device row, plus its ⌥ alternate or its submenu.
+/// Returns the hover text: full name and connection, plus "Not connected" when it is off.
+fn row_tooltip(device: &Device) -> String {
+    let base = format!("{} · {}", device.name, connection_label(device.connection));
+    if device.is_unrecognised() {
+        return format!("{base} · Click to try to detect, hold ⌥ to report it");
+    }
+    if percent_label(device) == NOT_CONNECTED_TEXT { format!("{base} · {NOT_CONNECTED_TEXT}") } else { base }
+}
+
+/// Builds one device row plus its ⌥ Report alternate. An unknown device's row runs Try to detect on
+/// click instead of opening a submenu, whose arrow alone made the menu about 30 pt wider.
 pub fn build_device_row(device: &Device, index: usize) -> Vec<Retained<NSMenuItem>> {
     let tag = index as isize;
-    let row = action_item(&device.name, sel!(rowClicked:), "", tag);
+    let action = if device.is_unrecognised() { sel!(tryToDetect:) } else { sel!(rowClicked:) };
+    let row = action_item(&device.name, action, "", tag);
     row.setAttributedTitle(Some(&row_title(device)));
-    let tooltip = if percent_label(device) == NOT_CONNECTED_TEXT { format!("{}, {NOT_CONNECTED_TEXT}", device.name) } else { device.name.clone() };
-    row.setToolTip(Some(&NSString::from_str(&tooltip)));
-    if device.is_unrecognised() {
-        let submenu = NSMenu::new(main_thread());
-        submenu.addItem(&action_item("Report device…", sel!(reportDevice:), "", tag));
-        submenu.addItem(&action_item("Try to detect", sel!(tryToDetect:), "", tag));
-        row.setSubmenu(Some(&submenu));
-        return vec![row];
-    }
-    let alternate = action_item(&format!("Report {}…", device.name), sel!(reportDevice:), "", tag);
+    row.setToolTip(Some(&NSString::from_str(&row_tooltip(device))));
+    let alternate = action_item("Report…", sel!(reportDevice:), "", tag);
     alternate.setAlternate(true);
     alternate.setKeyEquivalentModifierMask(NSEventModifierFlags::Option);
     row.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());

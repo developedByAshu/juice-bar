@@ -23,7 +23,7 @@ pub fn is_generic_usb_name(name: &str) -> bool {
 }
 
 /// Longest name a menu row shows before it is cut with "…"; the full name shows on hover.
-pub const MENU_NAME_MAX_CHARS: usize = 18;
+pub const MENU_NAME_MAX_CHARS: usize = 14;
 
 /// Cuts a long name for a menu row, keeping whole characters and ending with "…".
 pub fn short_name(name: &str) -> String {
