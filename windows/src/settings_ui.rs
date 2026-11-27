@@ -1,13 +1,13 @@
-//! The settings window, in the look of Windows 11 Settings: Mica behind, a page list on the left,
-//! and rounded cards on the right. Pages: General, Devices, About.
+//! The settings window, laid out exactly like NetSpeedGauge's: a tinted sidebar with the app name,
+//! the page list and the "Made in India" line, and the chosen page on the right in rounded rows
+//! under section headings. Pages: General, Devices, About.
 
 use crate::canvas::{create_font, mix, Align, Canvas};
-use crate::confirm_sheet::{confirm_click, confirm_hover, confirm_key, dismiss_confirm, is_confirm_open, paint_confirm, show_confirm, wrap_text, SheetFonts};
 use crate::glyph::glass_image;
-use crate::menu_ui::connection_label;
+use crate::menu_ui::{connection_label, fit_text};
 use crate::messages::WM_APP_SETTINGS_CHANGED;
 use crate::startup;
-use crate::theme::{apply_window_look, background_opacity, current_theme, font_family, icon_font_family, on_theme_change, tone_color, Backdrop, Theme, GREEN};
+use crate::theme::{apply_window_look, current_theme, draw_made_with_love, on_theme_change, tone_color, Backdrop, Theme, GREEN, ICON_FONT, UI_FONT, UI_FONT_STRONG};
 use crate::util::{scale, to_wide};
 use juicebar_shared::device::{Device, NameSource};
 use juicebar_shared::settings::Settings;
@@ -31,37 +31,59 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE, DLGC_WANTALLKEYS,
 };
 
+// Every size below is NetSpeedGauge's (windows/src/settings_ui.rs), at 100% scaling, so the two windows match.
 const CLASS_NAME: &str = "JuiceBarSettings";
-const WIDTH: i32 = 760;
-const HEIGHT: i32 = 520;
-const NAV_WIDTH: i32 = 200;
-const NAV_ITEM_HEIGHT: i32 = 36;
-const OUTER: i32 = 16;
-const CONTENT_LEFT: i32 = NAV_WIDTH + 24;
-const CONTENT_RIGHT_GAP: i32 = 24;
-const TITLE_TOP: i32 = 12;
-const CARDS_TOP: i32 = 68;
-const CARD_HEIGHT: i32 = 68;
-const DEVICE_CARD_HEIGHT: i32 = 76;
-const CARD_GAP: i32 = 4;
-const CARD_RADIUS: f32 = 6.0;
-const CARD_PADDING: i32 = 18;
-const BUTTON_HEIGHT: i32 = 32;
+const WIDTH: i32 = 680;
+const HEIGHT: i32 = 640;
+const SIDEBAR_WIDTH: i32 = 176;
+const MARGIN: i32 = 20;
+const HEADER_HEIGHT: i32 = 62;
+const ROW_HEIGHT: i32 = 50;
+const ROW_GAP: i32 = 4;
+const SECTION_GAP: i32 = 34;
+const NOTE_HEIGHT: i32 = 46;
+const ABOUT_CARD_HEIGHT: i32 = 96;
+const PRIVACY_LINE: i32 = 26;
+const PRIVACY_HEADER_HEIGHT: i32 = 68;
+const LOCK_TILE: i32 = 40;
+const CARD_RADIUS: i32 = 6;
+const NAV_TOP: i32 = 62;
+const NAV_ROW: i32 = 40;
+const SCROLL_STEP: i32 = 72;
+const CONTROL_HEIGHT: i32 = 30;
+const STEPPER_VALUE_WIDTH: i32 = 76;
 const TOGGLE_WIDTH: i32 = 40;
 const TOGGLE_HEIGHT: i32 = 20;
-const STEPPER_BUTTON: i32 = 32;
-const STEPPER_VALUE_WIDTH: i32 = 64;
-const SCROLL_STEP: i32 = 48;
+const DISABLED_FILL: f32 = 0.35;
+const DISABLED_TEXT: f32 = 0.5;
+// Devices rows start their name after the battery dot.
+const DEVICE_TEXT_LEFT: i32 = 30;
 const EDIT_SUBCLASS: usize = 1;
 const REPO_URL: &str = "https://github.com/developedByAshu/juice-bar";
 const LICENSE_URL: &str = "https://github.com/developedByAshu/juice-bar/blob/main/LICENSE";
 const ICON_GENERAL: &str = "\u{E713}";
 const ICON_DEVICES: &str = "\u{E772}";
 const ICON_ABOUT: &str = "\u{E946}";
-const ICON_HEART: &str = "\u{EB52}";
-const HEART_COLOR: u32 = 0xE5484D;
+const ICON_MINUS: &str = "\u{E738}";
+const ICON_PLUS: &str = "\u{E710}";
+const ICON_CHECK: &str = "\u{E73E}";
+const ICON_LOCK: &str = "\u{E72E}";
 const MIN_POLL_MINUTES: u32 = 1;
 const MAX_POLL_MINUTES: u32 = 60;
+const APP_NAME: &str = "Juice Bar";
+const APP_TAGLINE: &str = "Battery % of wireless mice and keyboards, in the tray.";
+const DEVELOPER_NAME: &str = "Ashutosh Anand";
+const DEVELOPER_ORIGIN: &str = "From India";
+const RESET_LABEL: &str = "Reset all";
+const RESET_CONFIRM_LABEL: &str = "Click to confirm";
+
+/// What Juice Bar does and does not do with data, shown on the About page.
+const PRIVACY_LINES: [&str; 4] = [
+    "Juice Bar never connects to the internet on its own.",
+    "It only reads battery levels from your wireless devices.",
+    "Your settings and renames are stored only on this PC.",
+    "Report sends only device ids, and only when you choose.",
+];
 
 /// The pages, in the order of the list on the left.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,26 +110,51 @@ enum Control {
     Link(&'static str),
 }
 
+/// One row of the General page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Setting {
+    Poll,
+    Percent,
+    Startup,
+    Reset,
+}
+
+/// One piece of a page, top to bottom, as NetSpeedGauge builds its pages.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Block {
+    Section(&'static str),
+    Note(&'static str),
+    Setting(Setting),
+    Device(usize),
+    NoDevices,
+    AboutCard,
+    Privacy,
+    Developer,
+    Link { label: &'static str, hint: &'static str, url: &'static str },
+}
+
 struct Fonts {
-    title: HFONT,
     body: HFONT,
     strong: HFONT,
-    caption: HFONT,
+    small: HFONT,
+    title: HFONT,
     icon: HFONT,
-    big: HFONT,
+    small_icon: HFONT,
+    heart: HFONT,
+    lock: HFONT,
 }
 
 impl Fonts {
     fn new(dpi: u32) -> Self {
-        let family = font_family();
-        let display = if family == "Segoe UI" { "Segoe UI" } else { "Segoe UI Variable Display" };
         Self {
-            title: create_font(display, 20.0, 600, dpi),
-            body: create_font(family, 10.5, 400, dpi),
-            strong: create_font(family, 10.5, 600, dpi),
-            caption: create_font(family, 9.0, 400, dpi),
-            icon: create_font(icon_font_family(), 12.0, 400, dpi),
-            big: create_font(display, 14.0, 600, dpi),
+            body: create_font(UI_FONT, 10.0, 400, dpi),
+            strong: create_font(UI_FONT_STRONG, 10.0, 400, dpi),
+            small: create_font(UI_FONT, 9.0, 400, dpi),
+            title: create_font(UI_FONT_STRONG, 16.0, 400, dpi),
+            icon: create_font(ICON_FONT, 11.0, 400, dpi),
+            small_icon: create_font(ICON_FONT, 8.0, 400, dpi),
+            heart: create_font(ICON_FONT, 9.0, 400, dpi),
+            lock: create_font(ICON_FONT, 15.0, 400, dpi),
         }
     }
 }
@@ -116,7 +163,7 @@ impl Drop for Fonts {
     fn drop(&mut self) {
         // SAFETY: each font was created in new() and is released once here.
         unsafe {
-            for font in [self.title, self.body, self.strong, self.caption, self.icon, self.big] {
+            for font in [self.body, self.strong, self.small, self.title, self.icon, self.small_icon, self.heart, self.lock] {
                 DeleteObject(font);
             }
         }
@@ -138,6 +185,8 @@ struct Window {
     /// The rename box and the device it renames, while open.
     edit: Option<(HWND, String)>,
     edit_brush: HBRUSH,
+    /// Reset all was clicked once; the next click on it resets, any other click cancels.
+    is_confirming_reset: bool,
 }
 
 thread_local! {
@@ -145,8 +194,9 @@ thread_local! {
     static LISTENING: RefCell<bool> = const { RefCell::new(false) };
 }
 
+/// Runs an action on the open window. A nested call while the window is busy is skipped, never a crash.
 fn with_window<T>(action: impl FnOnce(&mut Window) -> T) -> Option<T> {
-    WINDOW.with(|cell| cell.borrow_mut().as_mut().map(action))
+    WINDOW.with(|cell| cell.try_borrow_mut().ok().and_then(|mut state| state.as_mut().map(action)))
 }
 
 fn invalidate() {
@@ -161,64 +211,131 @@ fn device_list(state: &Window) -> Vec<Device> {
     state.devices.borrow().clone()
 }
 
+/// Returns the pieces of the current page, top to bottom.
+fn page_blocks(state: &Window) -> Vec<Block> {
+    match state.page {
+        Page::General => vec![
+            Block::Section("Battery checks"),
+            Block::Setting(Setting::Poll),
+            Block::Section("Tray icon"),
+            Block::Setting(Setting::Percent),
+            Block::Section("Startup"),
+            Block::Setting(Setting::Startup),
+            Block::Section("Reset"),
+            Block::Setting(Setting::Reset),
+        ],
+        Page::Devices => {
+            let count = state.devices.borrow().len();
+            let mut blocks = vec![Block::Section("Your devices"), Block::Note("Switch a device off to hide it from the menu.\nRename gives it a name you will recognise.")];
+            if count == 0 {
+                blocks.push(Block::NoDevices);
+            }
+            blocks.extend((0..count).map(Block::Device));
+            blocks
+        }
+        Page::About => vec![
+            Block::AboutCard,
+            Block::Section("Privacy"),
+            Block::Privacy,
+            Block::Section("Know your developer"),
+            Block::Developer,
+            Block::Section("Links"),
+            Block::Link { label: "Source code", hint: "github.com/developedByAshu/juice-bar", url: REPO_URL },
+            Block::Link { label: "Licence", hint: "GPL-3.0, free and open source", url: LICENSE_URL },
+        ],
+    }
+}
+
+/// Returns how much height a piece takes, the gap below it included.
+fn block_height(block: Block, dpi: u32) -> i32 {
+    match block {
+        Block::Section(_) => scale(SECTION_GAP + 8, dpi),
+        Block::Note(_) => scale(NOTE_HEIGHT, dpi),
+        Block::AboutCard => scale(ABOUT_CARD_HEIGHT + ROW_GAP, dpi),
+        Block::Privacy => scale(PRIVACY_HEADER_HEIGHT, dpi) + scale(PRIVACY_LINE, dpi) * PRIVACY_LINES.len() as i32 + scale(20, dpi) + scale(ROW_GAP, dpi),
+        _ => scale(ROW_HEIGHT + ROW_GAP, dpi),
+    }
+}
+
+/// Returns each piece of the current page with its top, scrolled.
+fn placed_blocks(state: &Window) -> Vec<(Block, i32)> {
+    let mut y = scale(HEADER_HEIGHT, state.dpi) - state.scroll;
+    page_blocks(state)
+        .into_iter()
+        .map(|block| {
+            let top = y;
+            y += block_height(block, state.dpi);
+            (block, top)
+        })
+        .collect()
+}
+
+/// Returns the height of the whole current page, from the header down.
+fn content_height(state: &Window) -> i32 {
+    page_blocks(state).into_iter().map(|block| block_height(block, state.dpi)).sum::<i32>() + scale(MARGIN, state.dpi)
+}
+
+/// Returns the left edge and width of the rows on the right, as NetSpeedGauge places them.
+fn content_columns(dpi: u32) -> (i32, i32) {
+    (scale(SIDEBAR_WIDTH + MARGIN - 4, dpi), scale(WIDTH - SIDEBAR_WIDTH - MARGIN * 2 + 4, dpi))
+}
+
+/// Returns a plain button of NetSpeedGauge's size whose right edge is `right`, in a row at `top`.
+fn button_rect(canvas: &Canvas, font: HFONT, label: &str, right: i32, top: i32, dpi: u32) -> RECT {
+    let width = canvas.text_width(label, font) + scale(28, dpi);
+    let button_top = top + scale(10, dpi);
+    RECT { left: right - width, top: button_top, right, bottom: button_top + scale(CONTROL_HEIGHT, dpi) }
+}
+
+/// Returns the switch's rectangle in a row whose right padding ends at `right`.
+fn toggle_rect(right: i32, top: i32, dpi: u32) -> RECT {
+    let (width, height) = (scale(TOGGLE_WIDTH, dpi), scale(TOGGLE_HEIGHT, dpi));
+    let toggle_top = top + (scale(ROW_HEIGHT, dpi) - height) / 2;
+    RECT { left: right - width, top: toggle_top, right, bottom: toggle_top + height }
+}
+
 /// Returns each control and its rectangle on the current page, scrolled.
 fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
     let dpi = state.dpi;
     let mut controls = Vec::new();
+    let sidebar = scale(SIDEBAR_WIDTH, dpi);
     for (index, (page, _, _)) in PAGES.iter().enumerate() {
-        let top = scale(CARDS_TOP, dpi) + index as i32 * scale(NAV_ITEM_HEIGHT + 4, dpi);
-        controls.push((Control::Nav(*page), RECT { left: scale(OUTER, dpi) - scale(4, dpi), top, right: scale(NAV_WIDTH, dpi), bottom: top + scale(NAV_ITEM_HEIGHT, dpi) }));
+        let top = scale(NAV_TOP + index as i32 * NAV_ROW, dpi);
+        controls.push((Control::Nav(*page), RECT { left: scale(8, dpi), top, right: sidebar - scale(8, dpi), bottom: top + scale(NAV_ROW - 4, dpi) }));
     }
-    let left = scale(CONTENT_LEFT, dpi);
-    let right = canvas.width() - scale(CONTENT_RIGHT_GAP, dpi);
-    let padding = scale(CARD_PADDING, dpi);
-    let card = |index: i32, height: i32| {
-        let top = scale(CARDS_TOP, dpi) + index * (scale(height, dpi) + scale(CARD_GAP, dpi)) - state.scroll;
-        (top, top + scale(height, dpi))
-    };
-    let middle_box = |top: i32, bottom: i32, width: i32, height: i32, right_edge: i32| {
-        let box_top = top + (bottom - top - height) / 2;
-        RECT { left: right_edge - width, top: box_top, right: right_edge, bottom: box_top + height }
-    };
-    match state.page {
-        Page::General => {
-            let (top, bottom) = card(0, CARD_HEIGHT);
-            let more = middle_box(top, bottom, scale(STEPPER_BUTTON, dpi), scale(STEPPER_BUTTON, dpi), right - padding);
-            let less_right = more.left - scale(STEPPER_VALUE_WIDTH, dpi);
-            controls.push((Control::PollLess, RECT { left: less_right - scale(STEPPER_BUTTON, dpi), right: less_right, ..more }));
-            controls.push((Control::PollMore, more));
-            for (index, control) in [(1, Control::PercentToggle), (2, Control::StartupToggle)] {
-                let (top, bottom) = card(index, CARD_HEIGHT);
-                controls.push((control, middle_box(top, bottom, scale(TOGGLE_WIDTH, dpi), scale(TOGGLE_HEIGHT, dpi), right - padding)));
+    let (left, width) = content_columns(dpi);
+    let right = left + width - scale(14, dpi);
+    let row = |top: i32| RECT { left, top, right: left + width, bottom: top + scale(ROW_HEIGHT, dpi) };
+    let settings = state.settings.borrow();
+    let devices = device_list(state);
+    for (block, top) in placed_blocks(state) {
+        match block {
+            Block::Setting(Setting::Poll) => {
+                let size = scale(CONTROL_HEIGHT, dpi);
+                let button_top = top + scale(10, dpi);
+                let plus_x = right - size;
+                let minus_x = plus_x - scale(STEPPER_VALUE_WIDTH, dpi) - size;
+                controls.push((Control::PollLess, RECT { left: minus_x, top: button_top, right: minus_x + size, bottom: button_top + size }));
+                controls.push((Control::PollMore, RECT { left: plus_x, top: button_top, right: plus_x + size, bottom: button_top + size }));
             }
-            let (top, bottom) = card(3, CARD_HEIGHT);
-            controls.push((Control::Reset, middle_box(top, bottom, scale(96, dpi), scale(BUTTON_HEIGHT, dpi), right - padding)));
-        }
-        Page::Devices => {
-            let devices = device_list(state);
-            let settings = state.settings.borrow();
-            for (index, device) in devices.iter().enumerate() {
-                let (top, bottom) = card(index as i32, DEVICE_CARD_HEIGHT);
-                let toggle = middle_box(top, bottom, scale(TOGGLE_WIDTH, dpi), scale(TOGGLE_HEIGHT, dpi), right - padding);
+            // As in NetSpeedGauge, a switch row reacts anywhere on the row.
+            Block::Setting(Setting::Percent) => controls.push((Control::PercentToggle, row(top))),
+            Block::Setting(Setting::Startup) => controls.push((Control::StartupToggle, row(top))),
+            Block::Setting(Setting::Reset) => {
+                let label = if state.is_confirming_reset { RESET_CONFIRM_LABEL } else { RESET_LABEL };
+                controls.push((Control::Reset, button_rect(canvas, state.fonts.body, label, right, top, dpi)));
+            }
+            Block::Device(index) => {
+                let toggle = toggle_rect(right, top, dpi);
                 controls.push((Control::ShowToggle(index), toggle));
-                let rename_right = toggle.left - scale(56, dpi);
-                let rename = middle_box(top, bottom, scale(84, dpi), scale(BUTTON_HEIGHT, dpi), rename_right);
+                let rename = button_rect(canvas, state.fonts.body, "Rename", toggle.left - scale(14, dpi), top, dpi);
                 controls.push((Control::Rename(index), rename));
-                if needs_name_confirm(device, &settings) {
-                    let confirm = middle_box(top, bottom, scale(124, dpi), scale(BUTTON_HEIGHT, dpi), rename.left - scale(8, dpi));
-                    controls.push((Control::ConfirmName(index), confirm));
+                if devices.get(index).is_some_and(|device| needs_name_confirm(device, &settings)) {
+                    controls.push((Control::ConfirmName(index), button_rect(canvas, state.fonts.body, "Keep this name", rename.left - scale(8, dpi), top, dpi)));
                 }
             }
-        }
-        Page::About => {
-            let top = scale(CARDS_TOP + 150, dpi);
-            let links = [("GitHub", REPO_URL), ("Licence (GPL-3.0)", LICENSE_URL)];
-            let mut x = left;
-            for (label, url) in links {
-                let width = canvas.text_width(label, state.fonts.body) + 2 * scale(14, dpi);
-                controls.push((Control::Link(url), RECT { left: x, top, right: x + width, bottom: top + scale(BUTTON_HEIGHT, dpi) }));
-                x += width + scale(8, dpi);
-            }
+            Block::Link { url, .. } => controls.push((Control::Link(url), button_rect(canvas, state.fonts.body, "Open", right, top, dpi))),
+            _ => {}
         }
     }
     controls
@@ -229,241 +346,286 @@ fn needs_name_confirm(device: &Device, settings: &Settings) -> bool {
     device.name_source == NameSource::BluetoothMemory && !settings.confirmed_bluetooth_names.contains_key(&device.id)
 }
 
-fn link_label(url: &str) -> &'static str {
-    if url == REPO_URL {
-        "GitHub"
+/// Paints the window: the page first, then the fixed header and sidebar over anything scrolled under them.
+fn paint(state: &Window, canvas: &mut Canvas) {
+    let theme = state.theme;
+    let dpi = state.dpi;
+    canvas.clear(theme.background, 1.0);
+    let controls = layout(state, canvas);
+    draw_page(state, canvas, &controls);
+    let sidebar = scale(SIDEBAR_WIDTH, dpi);
+    canvas.round_rect(sidebar, 0, canvas.width() - sidebar, scale(HEADER_HEIGHT, dpi), 0.0, theme.background, 1.0);
+    let title = PAGES.iter().find(|(page, _, _)| *page == state.page).map_or("", |(_, _, title)| title);
+    canvas.text(sidebar + scale(MARGIN - 4, dpi), scale(20, dpi), title, state.fonts.title, theme.text, Align::Left);
+    draw_sidebar(state, canvas, &controls);
+    draw_scrollbar(state, canvas);
+}
+
+fn draw_sidebar(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) {
+    let theme = state.theme;
+    let dpi = state.dpi;
+    let fonts = &state.fonts;
+    let sidebar = scale(SIDEBAR_WIDTH, dpi);
+    canvas.round_rect(0, 0, sidebar, canvas.height(), 0.0, mix(theme.background, theme.card, 0.45), 1.0);
+    canvas.text(scale(18, dpi), scale(22, dpi), APP_NAME, fonts.strong, theme.muted, Align::Left);
+    for (page, icon, label) in PAGES {
+        let Some(rect) = controls.iter().find(|(control, _)| *control == Control::Nav(page)).map(|(_, rect)| *rect) else { continue };
+        let (x, y, width, height) = (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+        let is_selected = state.page == page;
+        if is_selected || state.hovered == Some(Control::Nav(page)) {
+            let fill = if is_selected { theme.selected } else { mix(theme.background, theme.selected, 0.5) };
+            canvas.round_rect(x, y, width, height, scale(CARD_RADIUS, dpi) as f32, fill, 1.0);
+        }
+        if is_selected {
+            canvas.round_rect(x, y + scale(10, dpi), scale(3, dpi), height - scale(20, dpi), scale(2, dpi) as f32, theme.highlight, 1.0);
+        }
+        if state.focused == Some(Control::Nav(page)) {
+            draw_focus(canvas, &theme, &rect, dpi);
+        }
+        let color = if is_selected { theme.text } else { theme.muted };
+        canvas.text(x + scale(12, dpi), y + scale(10, dpi), icon, fonts.icon, color, Align::Left);
+        let font = if is_selected { fonts.strong } else { fonts.body };
+        canvas.text(x + scale(38, dpi), y + scale(9, dpi), label, font, theme.text, Align::Left);
+    }
+    draw_made_with_love(canvas, sidebar / 2, canvas.height() - scale(34, dpi), fonts.small, fonts.heart, theme.muted);
+}
+
+fn draw_scrollbar(state: &Window, canvas: &mut Canvas) {
+    let dpi = state.dpi;
+    let view = canvas.height() - scale(HEADER_HEIGHT, dpi);
+    let content = content_height(state);
+    if content <= view {
+        return;
+    }
+    let track_x = canvas.width() - scale(7, dpi);
+    let thumb_height = (view * view / content).max(scale(30, dpi));
+    let thumb_y = scale(HEADER_HEIGHT, dpi) + (view - thumb_height) * state.scroll / (content - view).max(1);
+    let color = mix(state.theme.background, state.theme.muted, 0.5);
+    canvas.round_rect(track_x, thumb_y, scale(3, dpi), thumb_height, scale(2, dpi) as f32, color, 1.0);
+}
+
+fn row_card(canvas: &mut Canvas, theme: &Theme, left: i32, top: i32, width: i32, height: i32, dpi: u32) {
+    canvas.round_rect(left, top, width, height, scale(CARD_RADIUS, dpi) as f32, theme.card, 1.0);
+}
+
+/// Draws a row's label, with its hint under it when there is one, cut to fit before the controls.
+fn row_label(canvas: &mut Canvas, state: &Window, x: i32, top: i32, label: &str, hint: &str, max_width: i32) {
+    let (theme, dpi, fonts) = (state.theme, state.dpi, &state.fonts);
+    if hint.is_empty() {
+        canvas.text(x, top + scale(15, dpi), &fit_text(canvas, label, fonts.body, max_width), fonts.body, theme.text, Align::Left);
     } else {
-        "Licence (GPL-3.0)"
+        canvas.text(x, top + scale(7, dpi), &fit_text(canvas, label, fonts.body, max_width), fonts.body, theme.text, Align::Left);
+        canvas.text(x, top + scale(27, dpi), &fit_text(canvas, hint, fonts.small, max_width), fonts.small, theme.muted, Align::Left);
     }
 }
 
-fn draw_card(canvas: &mut Canvas, theme: &Theme, left: i32, top: i32, right: i32, bottom: i32) {
-    let (fill, opacity) = if theme.has_backdrop { (0xFFFFFF, if theme.is_dark { 0.05 } else { 0.7 }) } else { (theme.card, 1.0) };
-    canvas.round_rect(left, top, right - left, bottom - top, CARD_RADIUS, fill, opacity);
-    canvas.round_outline(left, top, right - left, bottom - top, CARD_RADIUS, 1.0, 0x000000, if theme.is_dark { 0.2 } else { 0.06 });
-}
-
-fn draw_button(canvas: &mut Canvas, theme: &Theme, rect: &RECT, label: &str, font: HFONT, is_hovered: bool, is_accent: bool) {
+/// Draws a plain or accent button the way NetSpeedGauge does.
+fn draw_button(canvas: &mut Canvas, state: &Window, rect: &RECT, label: &str, control: Control, is_accent: bool) {
+    let (theme, dpi) = (state.theme, state.dpi);
+    let is_hovered = state.hovered == Some(control);
     let (fill, text) = if is_accent {
-        (theme.accent, theme.on_accent)
-    } else if theme.is_dark {
-        (0x3A3A3A, theme.text)
+        (if is_hovered { mix(theme.highlight, theme.text, 0.12) } else { theme.highlight }, theme.on_accent)
     } else {
-        (0xFBFBFB, theme.text)
+        (if is_hovered { theme.button_hover } else { theme.button }, theme.text)
     };
-    let fill = if is_hovered { mix(fill, if theme.is_dark { 0xFFFFFF } else { 0x000000 }, 0.06) } else { fill };
-    canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 4.0, fill, 1.0);
-    if !is_accent {
-        canvas.round_outline(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 4.0, 1.0, theme.border, 1.0);
+    canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, scale(CARD_RADIUS, dpi) as f32, fill, 1.0);
+    canvas.text((rect.left + rect.right) / 2, rect.top + scale(5, dpi), label, state.fonts.body, text, Align::Center);
+    if state.focused == Some(control) {
+        draw_focus(canvas, &theme, rect, dpi);
     }
-    let height = canvas.text_height(font);
-    canvas.text((rect.left + rect.right) / 2, rect.top + (rect.bottom - rect.top - height) / 2, label, font, text, Align::Center);
 }
 
-fn draw_toggle(canvas: &mut Canvas, theme: &Theme, rect: &RECT, is_on: bool, is_hovered: bool, font: HFONT, dpi: u32) {
-    let (width, height) = (rect.right - rect.left, rect.bottom - rect.top);
-    let knob = if is_hovered { scale(14, dpi) } else { scale(12, dpi) };
-    let knob_top = rect.top + (height - knob) / 2;
+/// Draws NetSpeedGauge's switch: filled in the accent when on, an outline when off.
+fn draw_toggle(canvas: &mut Canvas, theme: &Theme, rect: &RECT, is_on: bool, dpi: u32) {
+    let (x, top, width, height) = (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
     if is_on {
-        canvas.round_rect(rect.left, rect.top, width, height, height as f32 / 2.0, theme.accent, 1.0);
-        canvas.round_rect(rect.right - scale(4, dpi) - knob, knob_top, knob, knob, knob as f32 / 2.0, theme.on_accent, 1.0);
+        canvas.round_rect(x, top, width, height, height as f32 / 2.0, theme.highlight, 1.0);
     } else {
-        canvas.round_outline(rect.left, rect.top, width, height, height as f32 / 2.0, 1.0, theme.muted, 1.0);
-        canvas.round_rect(rect.left + scale(4, dpi), knob_top, knob, knob, knob as f32 / 2.0, theme.muted, 1.0);
+        canvas.round_rect(x, top, width, height, height as f32 / 2.0, theme.muted, 1.0);
+        canvas.round_rect(x + 1, top + 1, width - 2, height - 2, (height - 2) as f32 / 2.0, theme.card, 1.0);
     }
-    let label = if is_on { "On" } else { "Off" };
-    let text_height = canvas.text_height(font);
-    canvas.text(rect.left - scale(12, dpi), rect.top + (height - text_height) / 2, label, font, theme.text, Align::Right);
+    let knob = scale(12, dpi);
+    let knob_x = if is_on { x + width - knob - scale(4, dpi) } else { x + scale(4, dpi) };
+    let knob_color = if is_on { if theme.is_dark { 0x1B1B1B } else { 0xFFFFFF } } else { theme.muted };
+    canvas.round_rect(knob_x, top + (height - knob) / 2, knob, knob, knob as f32 / 2.0, knob_color, 1.0);
 }
 
 fn draw_focus(canvas: &mut Canvas, theme: &Theme, rect: &RECT, dpi: u32) {
     let ring = scale(2, dpi);
-    canvas.round_outline(rect.left - ring - 1, rect.top - ring - 1, rect.right - rect.left + 2 * ring + 2, rect.bottom - rect.top + 2 * ring + 2, 6.0, ring as f32, theme.text, 1.0);
+    canvas.round_outline(rect.left - ring - 1, rect.top - ring - 1, rect.right - rect.left + 2 * ring + 2, rect.bottom - rect.top + 2 * ring + 2, scale(CARD_RADIUS + 2, dpi) as f32, ring as f32, theme.text, 1.0);
 }
 
-/// Draws a card's title and its one-line description, left of its control.
-fn draw_card_text(canvas: &mut Canvas, theme: &Theme, fonts: &Fonts, left: i32, top: i32, bottom: i32, title: &str, detail: &str, max_width: i32) {
-    let title_height = canvas.text_height(fonts.body);
-    let detail_height = canvas.text_height(fonts.caption);
-    let block = title_height + if detail.is_empty() { 0 } else { detail_height + 2 };
-    let y = top + (bottom - top - block) / 2;
-    canvas.text(left, y, title, fonts.body, theme.text, Align::Left);
-    if !detail.is_empty() {
-        let line = wrap_text(canvas, detail, fonts.caption, max_width).into_iter().next().unwrap_or_default();
-        canvas.text(left, y + title_height + 2, &line, fonts.caption, theme.muted, Align::Left);
+/// Draws NetSpeedGauge's minus and plus buttons with the value between them.
+fn draw_stepper(canvas: &mut Canvas, state: &Window, less: &RECT, more: &RECT, value: &str, can_less: bool, can_more: bool) {
+    let (theme, dpi) = (state.theme, state.dpi);
+    for (rect, icon, control, is_enabled) in [(less, ICON_MINUS, Control::PollLess, can_less), (more, ICON_PLUS, Control::PollMore, can_more)] {
+        let (size, radius) = (rect.right - rect.left, scale(CARD_RADIUS, dpi) as f32);
+        let center = rect.left + size / 2;
+        if is_enabled {
+            let fill = if state.hovered == Some(control) { theme.button_hover } else { theme.button };
+            canvas.round_rect(rect.left, rect.top, size, size, radius, fill, 1.0);
+            canvas.text(center, rect.top + scale(9, dpi), icon, state.fonts.small_icon, theme.text, Align::Center);
+        } else {
+            // At the end of its range the button looks switched off, as in NetSpeedGauge.
+            canvas.round_rect(rect.left, rect.top, size, size, radius, mix(theme.card, theme.button, DISABLED_FILL), 1.0);
+            canvas.text(center, rect.top + scale(9, dpi), icon, state.fonts.small_icon, mix(theme.card, theme.muted, DISABLED_TEXT), Align::Center);
+        }
+        if state.focused == Some(control) {
+            draw_focus(canvas, &theme, rect, dpi);
+        }
     }
+    canvas.text((less.right + more.left) / 2, less.top + scale(5, dpi), value, state.fonts.body, theme.text, Align::Center);
 }
 
-fn paint(state: &Window, canvas: &mut Canvas) {
+/// Draws every piece of the current page, top to bottom.
+fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) {
     let theme = state.theme;
     let dpi = state.dpi;
     let fonts = &state.fonts;
-    canvas.clear(theme.background, background_opacity(&theme));
-    let controls = layout(state, canvas);
     let rect_of = |wanted: Control| controls.iter().find(|(control, _)| *control == wanted).map(|(_, rect)| *rect);
-    let is_hovered = |control: Control| state.hovered == Some(control);
-    let show_focus = |control: Control| state.focused == Some(control);
-    let left = scale(CONTENT_LEFT, dpi);
-    let right = canvas.width() - scale(CONTENT_RIGHT_GAP, dpi);
-    let padding = scale(CARD_PADDING, dpi);
+    let (left, width) = content_columns(dpi);
+    let right = left + width - scale(14, dpi);
+    let row_height = scale(ROW_HEIGHT, dpi);
+    let text_x = left + scale(14, dpi);
     let settings = state.settings.borrow().clone();
-
-    // Page content first, so the page list and title stay on top when the cards scroll.
-    match state.page {
-        Page::General => {
-            let rows = [
-                ("Check batteries every", "Juice Bar sleeps in between, so it costs no power"),
-                ("Show the lowest % in the icon", "Shows the number instead of the juice glass"),
-                ("Launch at login", "Starts Juice Bar when you sign in to Windows"),
-                ("Reset all settings", "Renames, hidden devices and choices go back to how they were"),
-            ];
-            for (index, (title, detail)) in rows.iter().enumerate() {
-                let top = scale(CARDS_TOP, dpi) + index as i32 * (scale(CARD_HEIGHT, dpi) + scale(CARD_GAP, dpi));
-                let bottom = top + scale(CARD_HEIGHT, dpi);
-                draw_card(canvas, &theme, left, top, right, bottom);
-                draw_card_text(canvas, &theme, fonts, left + padding, top, bottom, title, detail, right - left - padding * 2 - scale(170, dpi));
-            }
-            if let (Some(less), Some(more)) = (rect_of(Control::PollLess), rect_of(Control::PollMore)) {
-                draw_button(canvas, &theme, &less, "\u{2212}", fonts.body, is_hovered(Control::PollLess), false);
-                draw_button(canvas, &theme, &more, "+", fonts.body, is_hovered(Control::PollMore), false);
-                let value = format!("{} min", settings.poll_minutes);
-                let height = canvas.text_height(fonts.body);
-                canvas.text((less.right + more.left) / 2, less.top + (less.bottom - less.top - height) / 2, &value, fonts.body, theme.text, Align::Center);
-                for control in [Control::PollLess, Control::PollMore] {
-                    if show_focus(control) {
-                        draw_focus(canvas, &theme, &rect_of(control).unwrap_or(less), dpi);
-                    }
-                }
-            }
-            for (control, is_on) in [(Control::PercentToggle, settings.shows_percent_in_icon), (Control::StartupToggle, startup::is_enabled())] {
-                if let Some(rect) = rect_of(control) {
-                    draw_toggle(canvas, &theme, &rect, is_on, is_hovered(control), fonts.body, dpi);
-                    if show_focus(control) {
-                        draw_focus(canvas, &theme, &rect, dpi);
-                    }
-                }
-            }
-            if let Some(rect) = rect_of(Control::Reset) {
-                draw_button(canvas, &theme, &rect, "Reset", fonts.body, is_hovered(Control::Reset), false);
-                if show_focus(Control::Reset) {
-                    draw_focus(canvas, &theme, &rect, dpi);
-                }
-            }
+    let devices = device_list(state);
+    for (block, top) in placed_blocks(state) {
+        if top > canvas.height() || top + block_height(block, dpi) < scale(HEADER_HEIGHT, dpi) - scale(ROW_HEIGHT, dpi) {
+            continue;
         }
-        Page::Devices => {
-            let devices = device_list(state);
-            if devices.is_empty() {
-                canvas.text(left, scale(CARDS_TOP, dpi), "No wireless mouse or keyboard found yet. Plug in a dongle and it shows up here.", fonts.body, theme.muted, Align::Left);
+        match block {
+            Block::Section(title) => canvas.text(left + scale(2, dpi), top + scale(14, dpi), title, fonts.strong, theme.text, Align::Left),
+            Block::Note(text) => {
+                let (first, second) = text.split_once('\n').unwrap_or((text, ""));
+                canvas.text(left + scale(2, dpi), top + scale(2, dpi), first, fonts.small, theme.muted, Align::Left);
+                canvas.text(left + scale(2, dpi), top + scale(19, dpi), second, fonts.small, theme.muted, Align::Left);
             }
-            for (index, device) in devices.iter().enumerate() {
-                let top = scale(CARDS_TOP, dpi) + index as i32 * (scale(DEVICE_CARD_HEIGHT, dpi) + scale(CARD_GAP, dpi)) - state.scroll;
-                let bottom = top + scale(DEVICE_CARD_HEIGHT, dpi);
-                if bottom < scale(CARDS_TOP, dpi) || top > canvas.height() {
-                    continue;
+            Block::Setting(setting) => {
+                row_card(canvas, &theme, left, top, width, row_height, dpi);
+                // The label and hint run up to the row's control, with NetSpeedGauge's 14 px gap.
+                let control_left = match setting {
+                    Setting::Poll => rect_of(Control::PollLess).map_or(right, |rect| rect.left),
+                    Setting::Reset => rect_of(Control::Reset).map_or(right, |rect| rect.left),
+                    Setting::Percent | Setting::Startup => toggle_rect(right, top, dpi).left,
+                };
+                let label_room = control_left - scale(14, dpi) - text_x;
+                match setting {
+                    Setting::Poll => {
+                        row_label(canvas, state, text_x, top, "Check batteries every", "Juice Bar sleeps in between, so it costs no power", label_room);
+                        if let (Some(less), Some(more)) = (rect_of(Control::PollLess), rect_of(Control::PollMore)) {
+                            let minutes = settings.poll_minutes;
+                            draw_stepper(canvas, state, &less, &more, &format!("{minutes} min"), minutes > MIN_POLL_MINUTES, minutes < MAX_POLL_MINUTES);
+                        }
+                    }
+                    Setting::Percent | Setting::Startup => {
+                        let (label, hint, is_on, control) = if setting == Setting::Percent {
+                            ("Show the lowest % in the icon", "Shows the number instead of the juice glass", settings.shows_percent_in_icon, Control::PercentToggle)
+                        } else {
+                            ("Start with Windows", "Opens Juice Bar when you sign in", startup::is_enabled(), Control::StartupToggle)
+                        };
+                        row_label(canvas, state, text_x, top, label, hint, label_room);
+                        let toggle = toggle_rect(right, top, dpi);
+                        draw_toggle(canvas, &theme, &toggle, is_on, dpi);
+                        if state.focused == Some(control) {
+                            draw_focus(canvas, &theme, &toggle, dpi);
+                        }
+                    }
+                    Setting::Reset => {
+                        row_label(canvas, state, text_x, top, "Every setting", "Renames, hidden devices and the check interval", label_room);
+                        if let Some(rect) = rect_of(Control::Reset) {
+                            let label = if state.is_confirming_reset { RESET_CONFIRM_LABEL } else { RESET_LABEL };
+                            draw_button(canvas, state, &rect, label, Control::Reset, false);
+                        }
+                    }
                 }
-                draw_card(canvas, &theme, left, top, right, bottom);
+            }
+            Block::NoDevices => {
+                row_card(canvas, &theme, left, top, width, row_height, dpi);
+                row_label(canvas, state, text_x, top, "No wireless mouse or keyboard found yet", "Plug in a dongle and it shows up here", width - scale(28, dpi));
+            }
+            Block::Device(index) => {
+                let Some(device) = devices.get(index) else { continue };
+                row_card(canvas, &theme, left, top, width, row_height, dpi);
                 let reading = match device.battery {
                     Some(battery) => format!("{}%{}", battery.percent, if battery.is_charging { " charging" } else { "" }),
                     None if device.is_unrecognised() => "Not recognised yet".to_string(),
                     None => "Not connected".to_string(),
                 };
-                let mut detail = format!("{}  \u{00B7}  {reading}", connection_label(device.connection));
+                let mut hint = format!("{}  \u{00B7}  {reading}", connection_label(device.connection));
                 if needs_name_confirm(device, &settings) {
-                    detail.push_str("  \u{00B7}  name from Bluetooth");
+                    hint.push_str("  \u{00B7}  name from Bluetooth");
                 }
-                let is_hidden = settings.hidden.contains(&device.id);
-                let text_right = rect_of(Control::ConfirmName(index)).or(rect_of(Control::Rename(index))).map_or(right, |rect| rect.left) - scale(12, dpi);
-                let dot_x = left + padding + scale(4, dpi);
-                let middle = (top + bottom) / 2;
+                let dot_x = text_x + scale(4, dpi);
+                let middle = top + row_height / 2;
                 match device.battery {
                     Some(battery) => canvas.circle(dot_x, middle, scale(4, dpi), tone_color(tone_for_percent(battery.percent), &theme)),
                     None => canvas.round_outline(dot_x - scale(4, dpi), middle - scale(4, dpi), scale(8, dpi), scale(8, dpi), scale(4, dpi) as f32, 1.5, theme.muted, 1.0),
                 }
+                let name_x = left + scale(DEVICE_TEXT_LEFT, dpi);
+                let first_control = rect_of(Control::ConfirmName(index)).or(rect_of(Control::Rename(index))).map_or(right, |rect| rect.left);
                 let is_renaming = state.edit.as_ref().is_some_and(|(_, id)| id == &device.id);
-                let title = if is_renaming { String::new() } else { device.name.clone() };
-                draw_card_text(canvas, &theme, fonts, left + padding + scale(18, dpi), top, bottom, &title, &detail, text_right - left - padding - scale(18, dpi));
+                let label = if is_renaming { "" } else { device.name.as_str() };
+                row_label(canvas, state, name_x, top, label, &hint, first_control - scale(12, dpi) - name_x);
                 if let Some(rect) = rect_of(Control::Rename(index)) {
-                    draw_button(canvas, &theme, &rect, "Rename", fonts.body, is_hovered(Control::Rename(index)), false);
+                    draw_button(canvas, state, &rect, "Rename", Control::Rename(index), false);
                 }
                 if let Some(rect) = rect_of(Control::ConfirmName(index)) {
-                    draw_button(canvas, &theme, &rect, "Keep this name", fonts.body, is_hovered(Control::ConfirmName(index)), true);
+                    draw_button(canvas, state, &rect, "Keep this name", Control::ConfirmName(index), true);
                 }
                 if let Some(rect) = rect_of(Control::ShowToggle(index)) {
-                    draw_toggle(canvas, &theme, &rect, !is_hidden, is_hovered(Control::ShowToggle(index)), fonts.caption, dpi);
-                    let caption_height = canvas.text_height(fonts.caption);
-                    let _ = caption_height;
-                }
-                for control in [Control::Rename(index), Control::ConfirmName(index), Control::ShowToggle(index)] {
-                    if show_focus(control) {
-                        if let Some(rect) = rect_of(control) {
-                            draw_focus(canvas, &theme, &rect, dpi);
-                        }
+                    draw_toggle(canvas, &theme, &rect, !settings.hidden.contains(&device.id), dpi);
+                    if state.focused == Some(Control::ShowToggle(index)) {
+                        draw_focus(canvas, &theme, &rect, dpi);
                     }
                 }
             }
-        }
-        Page::About => {
-            let top = scale(CARDS_TOP, dpi);
-            let icon_size = scale(64, dpi) as u32;
-            canvas.draw_pixels(left, top, icon_size as i32, &glass_image(icon_size, theme.text, GREEN, Some(75)));
-            let text_left = left + icon_size as i32 + scale(16, dpi);
-            canvas.text(text_left, top + scale(4, dpi), "Juice Bar", fonts.big, theme.text, Align::Left);
-            canvas.text(text_left, top + scale(32, dpi), &format!("Version {}", juicebar_shared::APP_VERSION), fonts.body, theme.muted, Align::Left);
-            let description = "Battery % of wireless mice and keyboards, in the tray. Free and open source.";
-            canvas.text(left, top + scale(96, dpi), description, fonts.body, theme.text, Align::Left);
-            canvas.text(left, top + scale(120, dpi), "No account, no telemetry. Report sends only device ids, and only when you choose.", fonts.caption, theme.muted, Align::Left);
-            for (control, rect) in &controls {
-                if let Control::Link(url) = control {
-                    draw_button(canvas, &theme, rect, link_label(url), fonts.body, is_hovered(*control), false);
-                    if show_focus(*control) {
-                        draw_focus(canvas, &theme, rect, dpi);
-                    }
+            Block::AboutCard => {
+                let height = scale(ABOUT_CARD_HEIGHT, dpi);
+                row_card(canvas, &theme, left, top, width, height, dpi);
+                let icon_size = scale(56, dpi);
+                let x = left + scale(16, dpi);
+                canvas.text(x, top + scale(14, dpi), APP_NAME, fonts.title, theme.text, Align::Left);
+                canvas.text(x, top + scale(46, dpi), APP_TAGLINE, fonts.body, theme.muted, Align::Left);
+                canvas.text(x, top + scale(68, dpi), &format!("Version {}", juicebar_shared::APP_VERSION), fonts.small, theme.muted, Align::Left);
+                let icon_x = left + width - scale(16, dpi) - icon_size;
+                canvas.draw_pixels(icon_x, top + (height - icon_size) / 2, icon_size, &glass_image(icon_size as u32, theme.text, GREEN, Some(75)));
+            }
+            Block::Privacy => draw_privacy(canvas, state, left, top, width),
+            Block::Developer => {
+                row_card(canvas, &theme, left, top, width, row_height, dpi);
+                row_label(canvas, state, text_x, top, DEVELOPER_NAME, DEVELOPER_ORIGIN, width - scale(28, dpi));
+            }
+            Block::Link { label, hint, url } => {
+                row_card(canvas, &theme, left, top, width, row_height, dpi);
+                row_label(canvas, state, text_x, top, label, hint, width - scale(120, dpi));
+                if let Some(rect) = rect_of(Control::Link(url)) {
+                    draw_button(canvas, state, &rect, "Open", Control::Link(url), false);
                 }
             }
-            let love = "Made in India with ";
-            let love_y = top + scale(214, dpi);
-            canvas.text(left, love_y, love, fonts.caption, theme.muted, Align::Left);
-            let love_width = canvas.text_width(love, fonts.caption);
-            canvas.text(left + love_width, love_y + scale(2, dpi), ICON_HEART, fonts.caption_icon(dpi), HEART_COLOR, Align::Left);
         }
-    }
-
-    // A clean band behind the title, so scrolled cards pass under it.
-    if state.page == Page::Devices && state.scroll > 0 {
-        canvas.round_rect(left - scale(8, dpi), 0, right - left + scale(16, dpi), scale(CARDS_TOP - 4, dpi), 0.0, theme.background, if theme.has_backdrop { 0.85 } else { 1.0 });
-    }
-    let title = PAGES.iter().find(|(page, _, _)| *page == state.page).map_or("", |(_, _, title)| title);
-    canvas.text(left, scale(TITLE_TOP, dpi), title, fonts.title, theme.text, Align::Left);
-
-    for (page, icon, label) in PAGES {
-        let Some(rect) = rect_of(Control::Nav(page)) else { continue };
-        let is_selected = state.page == page;
-        if is_selected || is_hovered(Control::Nav(page)) {
-            let opacity = if theme.is_dark { if is_selected { 0.06 } else { 0.04 } } else if is_selected { 0.05 } else { 0.03 };
-            canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 4.0, theme.hover, opacity);
-        }
-        if is_selected {
-            let bar_height = scale(16, dpi);
-            canvas.round_rect(rect.left, rect.top + (rect.bottom - rect.top - bar_height) / 2, scale(3, dpi), bar_height, 1.5, theme.accent_text(), 1.0);
-        }
-        if show_focus(Control::Nav(page)) {
-            draw_focus(canvas, &theme, &rect, dpi);
-        }
-        let middle = (rect.top + rect.bottom) / 2;
-        canvas.text(rect.left + scale(14, dpi), middle - canvas.text_height(fonts.icon) / 2, icon, fonts.icon, theme.text, Align::Left);
-        canvas.text(rect.left + scale(44, dpi), middle - canvas.text_height(fonts.body) / 2, label, fonts.body, theme.text, Align::Left);
-    }
-
-    if is_confirm_open() {
-        let sheet_fonts = SheetFonts { title: fonts.big, body: fonts.body };
-        paint_confirm(canvas, &theme, &sheet_fonts, dpi, true);
     }
 }
 
-impl Fonts {
-    /// The heart in the About line, from the icon font at caption size.
-    fn caption_icon(&self, _dpi: u32) -> HFONT {
-        self.icon
+/// Draws the privacy card: a lock on a tinted tile, its promise, a dividing line and the four promises.
+fn draw_privacy(canvas: &mut Canvas, state: &Window, left: i32, top: i32, width: i32) {
+    let (theme, dpi, fonts) = (state.theme, state.dpi, &state.fonts);
+    let header = scale(PRIVACY_HEADER_HEIGHT, dpi);
+    let line_height = scale(PRIVACY_LINE, dpi);
+    let height = header + line_height * PRIVACY_LINES.len() as i32 + scale(20, dpi);
+    row_card(canvas, &theme, left, top, width, height, dpi);
+    let tile = scale(LOCK_TILE, dpi);
+    let (tile_x, tile_y) = (left + scale(14, dpi), top + scale(14, dpi));
+    canvas.round_rect(tile_x, tile_y, tile, tile, scale(CARD_RADIUS + 2, dpi) as f32, mix(theme.card, theme.highlight, 0.18), 1.0);
+    let lock_y = tile_y + (tile - canvas.text_height(fonts.lock)) / 2;
+    canvas.text(tile_x + tile / 2, lock_y, ICON_LOCK, fonts.lock, theme.highlight, Align::Center);
+    let text_x = tile_x + tile + scale(12, dpi);
+    canvas.text(text_x, tile_y + scale(1, dpi), "Your data stays with you", fonts.strong, theme.text, Align::Left);
+    canvas.text(text_x, tile_y + scale(21, dpi), "Private and stored only on this PC", fonts.small, theme.muted, Align::Left);
+    canvas.round_rect(left + scale(14, dpi), top + header, width - scale(28, dpi), 1, 0.0, theme.border, 1.0);
+    for (position, line) in PRIVACY_LINES.iter().enumerate() {
+        let line_y = top + header + scale(10, dpi) + position as i32 * line_height;
+        canvas.text(left + scale(14, dpi), line_y + scale(5, dpi), ICON_CHECK, fonts.small_icon, theme.highlight, Align::Left);
+        canvas.text(left + scale(36, dpi), line_y, line, fonts.body, theme.text, Align::Left);
     }
 }
 
@@ -477,6 +639,8 @@ fn save_and_announce(state: &Window) {
 /// Runs what a control does when clicked or picked from the keyboard.
 fn activate(control: Control) {
     let devices = with_window(|state| device_list(state)).unwrap_or_default();
+    // Any other click cancels a Reset all that waits for its second click, as in NetSpeedGauge.
+    let was_confirming = with_window(|state| std::mem::replace(&mut state.is_confirming_reset, false)).unwrap_or(false);
     match control {
         Control::Nav(page) => {
             close_rename(true);
@@ -508,17 +672,15 @@ fn activate(control: Control) {
             startup::set_enabled(!startup::is_enabled());
         }
         Control::Reset => {
-            show_confirm(
-                "Reset all settings?",
-                "Renames, hidden devices, confirmed Bluetooth names and the check interval go back to how they were at install. Launch at login stays as it is.",
-                || {
-                    with_window(|state| {
-                        *state.settings.borrow_mut() = Settings::default();
-                        save_and_announce(state);
-                    });
-                    invalidate();
-                },
-            );
+            with_window(|state| {
+                if was_confirming {
+                    // Start with Windows stays as it is: it lives in Windows' own startup list.
+                    *state.settings.borrow_mut() = Settings::default();
+                    save_and_announce(state);
+                } else {
+                    state.is_confirming_reset = true;
+                }
+            });
         }
         Control::Rename(index) => {
             if let Some(device) = devices.get(index) {
@@ -558,14 +720,14 @@ fn open_rename(index: usize, device: &Device) {
     close_rename(true);
     with_window(|state| {
         let dpi = state.dpi;
-        let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let Some(row_top) = placed_blocks(state).into_iter().find(|(block, _)| *block == Block::Device(index)).map(|(_, top)| top) else { return };
         // SAFETY: the window is alive while it is stored; the edit box is its child and dies with it.
         unsafe {
-            GetClientRect(state.window, &mut client);
-            let left = scale(CONTENT_LEFT + CARD_PADDING + 18, dpi);
-            let top = scale(CARDS_TOP, dpi) + index as i32 * (scale(DEVICE_CARD_HEIGHT, dpi) + scale(CARD_GAP, dpi)) - state.scroll + scale(12, dpi);
-            let width = scale(260, dpi);
-            let height = scale(28, dpi);
+            let (content_left, _) = content_columns(dpi);
+            let left = content_left + scale(DEVICE_TEXT_LEFT, dpi);
+            let top = row_top + scale(5, dpi);
+            let width = scale(200, dpi);
+            let height = scale(20, dpi);
             let class = to_wide("EDIT");
             let text = to_wide(&device.name);
             let edit = CreateWindowExW(
@@ -661,7 +823,7 @@ fn hit_test(x: i32, y: i32) -> Option<Control> {
         let controls = layout(state, &sized);
         let inside = |rect: &RECT| x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom;
         controls.into_iter().find(|(control, rect)| {
-            let on_page_area = matches!(control, Control::Nav(_)) || y >= scale(CARDS_TOP - 4, state.dpi);
+            let on_page_area = matches!(control, Control::Nav(_)) || (x >= scale(SIDEBAR_WIDTH, state.dpi) && y >= scale(HEADER_HEIGHT, state.dpi));
             on_page_area && inside(rect)
         }).map(|(control, _)| control)
     })
@@ -695,17 +857,11 @@ fn client_canvas(window: HWND) -> Canvas {
 
 fn scroll_by(delta: i32) {
     with_window(|state| {
-        if state.page != Page::Devices {
-            return;
-        }
-        let count = state.devices.borrow().len() as i32;
-        let dpi = state.dpi;
-        let content = count * (scale(DEVICE_CARD_HEIGHT, dpi) + scale(CARD_GAP, dpi));
         let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
         // SAFETY: the window is alive while it is stored.
         unsafe { GetClientRect(state.window, &mut client) };
-        let visible = client.bottom - scale(CARDS_TOP, dpi) - scale(OUTER, dpi);
-        state.scroll = (state.scroll + delta).clamp(0, (content - visible).max(0));
+        let visible = client.bottom - scale(HEADER_HEIGHT, state.dpi);
+        state.scroll = (state.scroll + delta).clamp(0, (content_height(state) - visible).max(0));
     });
     close_rename(true);
     invalidate();
@@ -726,14 +882,6 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
         WM_ERASEBKGND => 1,
         WM_MOUSEMOVE => {
             let (x, y) = point_of(lparam);
-            if is_confirm_open() {
-                let canvas = client_canvas(window);
-                let changed = with_window(|state| confirm_hover(&canvas, &SheetFonts { title: state.fonts.big, body: state.fonts.body }, state.dpi, x, y)).unwrap_or(false);
-                if changed {
-                    invalidate();
-                }
-                return 0;
-            }
             let control = hit_test(x, y);
             let changed = with_window(|state| {
                 let changed = state.hovered != control;
@@ -751,16 +899,14 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
         }
         WM_LBUTTONUP => {
             let (x, y) = point_of(lparam);
-            if is_confirm_open() {
-                let canvas = client_canvas(window);
-                if let Some((dpi, title, body)) = with_window(|state| (state.dpi, state.fonts.big, state.fonts.body)) {
-                    confirm_click(&canvas, &SheetFonts { title, body }, dpi, x, y);
+            match hit_test(x, y) {
+                Some(control) => activate(control),
+                None => {
+                    // A click on empty space cancels a Reset all that waits for its second click.
+                    if with_window(|state| std::mem::replace(&mut state.is_confirming_reset, false)) == Some(true) {
+                        invalidate();
+                    }
                 }
-                invalidate();
-                return 0;
-            }
-            if let Some(control) = hit_test(x, y) {
-                activate(control);
             }
             0
         }
@@ -772,11 +918,6 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
         }
         WM_KEYDOWN => {
             let key = wparam as u16;
-            if is_confirm_open() {
-                confirm_key(key);
-                invalidate();
-                return 0;
-            }
             let shift = GetKeyState(i32::from(VK_SHIFT)) < 0;
             match key {
                 VK_TAB => move_focus(if shift { -1 } else { 1 }),
@@ -828,7 +969,6 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
             0
         }
         WM_DESTROY => {
-            dismiss_confirm();
             if let Some(state) = WINDOW.with(|cell| cell.borrow_mut().take()) {
                 DeleteObject(state.edit_brush);
             }
@@ -945,6 +1085,7 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
                 scroll: 0,
                 edit: None,
                 edit_brush: CreateSolidBrush(swap_rgb(theme.card)),
+                is_confirming_reset: false,
             });
         });
         ShowWindow(window, SW_SHOW);
@@ -952,9 +1093,10 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
     }
 }
 
-/// Opens the Reset confirm card, for screenshots and tests of the card.
+/// Puts Reset all in its "Click to confirm" state, for screenshots of it.
 pub fn show_reset_confirm() {
-    activate(Control::Reset);
+    with_window(|state| state.is_confirming_reset = true);
+    invalidate();
 }
 
 /// Redraws the open window after a read, so the Devices page shows fresh readings.
