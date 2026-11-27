@@ -17,7 +17,7 @@ use objc2::runtime::{AnyObject, Sel};
 use objc2::{define_class, msg_send, sel, AnyThread, DefinedClass, MainThreadOnly};
 use objc2_app_kit::{NSAppearanceCustomization, NSEvent, NSEventModifierFlags, NSMenu, NSMenuItem, NSTrackingArea, NSTrackingAreaOptions, NSView};
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 const MENU_WIDTH: i32 = 164;
 const SUMMARY_HEIGHT: i32 = 34;
@@ -240,10 +240,7 @@ impl MenuRowView {
         if let Some(forced) = FORCED_HIGHLIGHT.with(Cell::get) {
             return forced == self.ivars().index;
         }
-        let Some(item) = self.enclosingMenuItem() else {
-            return false;
-        };
-        item.isEnabled() && (item.isHighlighted() || self.ivars().is_mouse_inside.get())
+        self.ivars().is_mouse_inside.get() && self.row_item().is_some_and(|(_, item)| item.isEnabled())
     }
 
     fn draw(&self) {
@@ -303,12 +300,17 @@ impl MenuRowView {
     }
 
     /// Runs the row's item, or Report for a device on right-click or ⌥-click, then closes the menu.
+    /// Returns the menu and this row's own hidden item, which holds its action, tag and shortcut.
+    fn row_item(&self) -> Option<(Retained<NSMenu>, Retained<NSMenuItem>)> {
+        let panel = self.enclosingMenuItem()?;
+        // SAFETY: the panel item is alive while its view is on screen, so its menu is too.
+        let menu = unsafe { panel.menu() }?;
+        let item = menu.itemAtIndex(self.ivars().index as isize)?;
+        Some((menu, item))
+    }
+
     fn clicked(&self, wants_report: bool) {
-        let Some(item) = self.enclosingMenuItem() else {
-            return;
-        };
-        // SAFETY: the item is alive while its view handles the click, so its menu is too.
-        let Some(menu) = (unsafe { item.menu() }) else {
+        let Some((menu, item)) = self.row_item() else {
             return;
         };
         match &self.ivars().row {
@@ -360,18 +362,22 @@ pub fn name_gap_for_checks(devices: &[Device]) -> i32 {
 }
 
 /// Fills the menu: header, one row per device, a divider, then Settings and Quit with their shortcuts.
+/// As in NetSpeedGauge, every row is drawn inside ONE panel item: separate view items each get spacing
+/// from macOS, which left about 40 pt empty under Quit. Each row keeps a hidden item of its own, so its
+/// action, tag and shortcut (⌘, and ⌘Q) still work while the menu is open.
 pub fn show_menu(menu: &NSMenu, devices: &[Device]) {
     menu.removeAllItems();
     let width = menu_width(devices);
+    let rows = RefCell::new(Vec::<Retained<MenuRowView>>::new());
     let add = |item: Retained<NSMenuItem>, row: MenuRow, tooltip: Option<String>| {
         let view = MenuRowView::create(row, menu.numberOfItems() as usize, width);
         if let Some(text) = tooltip {
-            let text = NSString::from_str(&text);
-            item.setToolTip(Some(&text));
-            view.setToolTip(Some(&text));
+            view.setToolTip(Some(&NSString::from_str(&text)));
         }
-        item.setView(Some(&view));
+        item.setHidden(true);
+        item.setAllowsKeyEquivalentWhenHidden(true);
         menu.addItem(&item);
+        rows.borrow_mut().push(view);
     };
     add(action_item(None, "", -1), MenuRow::Header, None);
     if devices.is_empty() {
@@ -385,6 +391,28 @@ pub fn show_menu(menu: &NSMenu, devices: &[Device]) {
     add(action_item(None, "", -1), MenuRow::Divider, None);
     add(targeted_item(sel!(openSettings:), ",", -1), MenuRow::Settings, None);
     add(action_item(Some(sel!(terminate:)), "q", -1), MenuRow::Quit, None);
+    let rows = rows.into_inner();
+    let height: f64 = rows.iter().map(|view| view.frame().size.height).sum();
+    let panel = NSView::initWithFrame(NSView::alloc(main_thread()), NSRect::new(NSPoint::ZERO, NSSize::new(f64::from(width), height)));
+    let mut top = height;
+    for view in &rows {
+        top -= view.frame().size.height;
+        view.setFrameOrigin(NSPoint::new(0.0, top));
+        panel.addSubview(view);
+    }
+    let panel_item = NSMenuItem::new(main_thread());
+    panel_item.setView(Some(&panel));
+    menu.addItem(&panel_item);
+}
+
+/// Returns the drawn rows of a filled menu, top first.
+fn row_views(menu: &NSMenu) -> Vec<Retained<NSView>> {
+    let Some(panel) = menu.itemArray().iter().find_map(|item| item.view()) else {
+        return Vec::new();
+    };
+    let mut rows: Vec<Retained<NSView>> = panel.subviews().iter().collect();
+    rows.sort_by(|a, b| b.frame().origin.y.total_cmp(&a.frame().origin.y));
+    rows
 }
 
 /// Opens the prefilled GitHub issue for the device behind a row.
@@ -401,8 +429,8 @@ pub fn on_report(tag: isize) {
 pub fn capture_menu_for_checks(devices: &[Device], path: &str, is_dark: bool, highlight: Option<usize>) -> bool {
     let menu = NSMenu::new(main_thread());
     show_menu(&menu, devices);
-    let views: Vec<Retained<NSView>> = menu.itemArray().iter().filter_map(|item| item.view()).collect();
-    menu.itemArray().iter().for_each(|item| item.setView(None));
+    let views = row_views(&menu);
+    views.iter().for_each(|view| view.removeFromSuperview());
     let width = views.first().map_or(MENU_WIDTH, |view| view.frame().size.width as i32);
     let height: f64 = views.iter().map(|view| view.frame().size.height).sum();
     let container = NSView::initWithFrame(NSView::alloc(main_thread()), NSRect::new(NSPoint::ZERO, NSSize::new(f64::from(width), height)));
