@@ -20,13 +20,16 @@ const READ_TIMEOUT_MS: i32 = 1000;
 pub struct Yuandaxin;
 
 /// Reads a pushed status report. `report` starts with the report id. None if it is another report.
+/// The byte after the % is 1 while the cable charges it: recorded on 28 Nov 2026 as
+/// `01 04 01 32 01` on the wired interface (04f3:026e) with the cable in, `01 04 01 32 00` on battery.
 pub fn parse_status(report: &[u8]) -> Option<Battery> {
     let (&id, rest) = report.split_first()?;
     if id != REPORT_ID || rest.len() < 4 || rest[..3] != STATUS_PREFIX {
         return None;
     }
     let percent = rest[3];
-    (1..=100).contains(&percent).then_some(Battery { percent, is_charging: false })
+    let is_charging = rest.get(4).is_some_and(|flags| flags & 1 == 1);
+    (1..=100).contains(&percent).then_some(Battery { percent, is_charging })
 }
 
 impl BatteryProtocol for Yuandaxin {

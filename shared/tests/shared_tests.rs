@@ -138,6 +138,14 @@ fn yuandaxin_reads_the_recorded_xs_flow_status() {
 }
 
 #[test]
+fn yuandaxin_reads_charging_from_the_recorded_cable_status() {
+    let wired = [0x04, 0x01, 0x04, 0x01, 0x32, 0x01, 0x00, 0x00, 0x01, 0x03, 0x02];
+    assert_eq!(yuandaxin::parse_status(&wired), Some(Battery { percent: 50, is_charging: true }));
+    let dongle_while_wired = [0x04, 0x00, 0x04, 0x01, 0x32, 0x00, 0x00, 0x00, 0x01, 0x03, 0x02];
+    assert_eq!(yuandaxin::parse_status(&dongle_while_wired), None);
+}
+
+#[test]
 fn yuandaxin_ignores_other_reports_and_stays_silent_without_a_status() {
     assert_eq!(yuandaxin::parse_status(&[0x04, 0x01, 0x05, 0x01, 0x32]), None);
     assert_eq!(yuandaxin::parse_status(&[0x05, 0x01, 0x04, 0x01, 0x32]), None);

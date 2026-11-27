@@ -18,7 +18,9 @@ How each family is read. Bytes verified against real hardware unless marked othe
 - Driver fields: `levelPercent`, `charging`, `voltageMv`.
 - Battery: the mouse pushes input report 4 about every 5 s on its own: `01 04 01 <percent> 00 00 00 01 03 02 ...`
   (0x32 = 50%). Recorded 28 Nov 2026 by logging Kontrol's WebHID traffic in the browser; Juice Bar only
-  listens for up to 6 s, it never sends anything. Charging bit not identified yet.
+  listens for up to 6 s, it never sends anything. Charging: the byte after the % is 01 while the cable charges it.
+  With the cable in, the mouse reports on the wired device 04f3:026e (`01 04 01 32 01`); the dongle's report then
+  starts `00` (`00 04 01 32 00`) and is ignored. Recorded on Windows 28 Nov 2026.
 - On macOS the interface needs Input Monitoring (privilege violation without it), which only the user can grant.
 
 ## Sources

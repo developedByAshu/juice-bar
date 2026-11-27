@@ -12,7 +12,7 @@ use crate::settings_ui::{close_settings, open_settings, refresh_settings};
 use crate::status_icon::{create_status_icon, set_tooltip, update_status_icon, use_hover_card};
 use crate::util::to_wide;
 use juicebar_shared::demo::{is_demo_mode, sample_devices};
-use juicebar_shared::device::{Device, NameSource};
+use juicebar_shared::device::{Battery, Device, NameSource};
 use juicebar_shared::protocols::bytech::{parse_event, KeyboardEvent};
 use juicebar_shared::report::{report_url, InterfaceSummary};
 use juicebar_shared::scan::{build_device, probe_usb_device, scan_dongles, ScannedDevice};
@@ -258,6 +258,12 @@ pub fn keep_recent_readings(new: &mut [Device], old: &[Device], last_read: &mut 
     }
 }
 
+/// Returns the battery after a keyboard event. A pushed battery event carries only the %, so charging
+/// is kept from the last full reading; a sleep event (None) clears it. Mirrors the Mac.
+pub fn pushed_battery(pushed: Option<Battery>, last: Option<Battery>) -> Option<Battery> {
+    pushed.map(|battery| Battery { percent: battery.percent, is_charging: last.is_some_and(|last| last.is_charging) })
+}
+
 /// Returns the devices under the names in use: the user's rename first, else the device's own name.
 pub fn with_renames(devices: &[Device], settings: &Settings) -> Vec<Device> {
     devices
@@ -375,7 +381,7 @@ impl App {
                 _ => None,
             };
             for device in self.devices.borrow_mut().iter_mut().filter(|device| device.vendor_id == vendor_id && device.product_id == product_id) {
-                device.battery = battery;
+                device.battery = pushed_battery(battery, device.battery);
                 if battery.is_some() {
                     self.last_read.insert(device.id.clone(), Instant::now());
                 }

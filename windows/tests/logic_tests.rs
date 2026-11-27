@@ -281,3 +281,12 @@ fn the_rename_shows_when_set_and_the_own_name_comes_back_when_cleared() {
     settings.renames.clear();
     assert_eq!(with_renames(&own, &settings)[0].name, "Kreo Swarm 75", "no rename falls back to the own name");
 }
+
+#[test]
+fn pushed_keyboard_percent_keeps_charging_from_the_last_reading() {
+    use juicebar_windows::app::pushed_battery;
+    let charging = Some(Battery { percent: 70, is_charging: true });
+    assert_eq!(pushed_battery(Some(Battery { percent: 71, is_charging: false }), charging), Some(Battery { percent: 71, is_charging: true }));
+    assert_eq!(pushed_battery(Some(Battery { percent: 71, is_charging: false }), None), Some(Battery { percent: 71, is_charging: false }));
+    assert_eq!(pushed_battery(None, charging), None);
+}
