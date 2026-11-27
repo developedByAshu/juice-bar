@@ -16,7 +16,10 @@ How each family is read. Bytes verified against real hardware unless marked othe
 
 - Interface: usage page 0x000A; input report 4, feature reports 5, 6, 188 (sizes from the real descriptor).
 - Driver fields: `levelPercent`, `charging`, `voltageMv`.
-- Not read yet: on macOS the interface needs Input Monitoring (privilege violation without it), which only the user can grant. The battery bytes are inside Kontrol's wasm driver; its JS simulator does not model them. Next: read with Input Monitoring granted, or on Windows where no grant is needed.
+- Battery: the mouse pushes input report 4 about every 5 s on its own: `01 04 01 <percent> 00 00 00 01 03 02 ...`
+  (0x32 = 50%). Recorded 28 Nov 2026 by logging Kontrol's WebHID traffic in the browser; Juice Bar only
+  listens for up to 6 s, it never sends anything. Charging bit not identified yet.
+- On macOS the interface needs Input Monitoring (privilege violation without it), which only the user can grant.
 
 ## Sources
 
