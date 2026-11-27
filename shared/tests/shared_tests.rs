@@ -1,6 +1,6 @@
 use juicebar_shared::device::{Battery, Connection, Device, DeviceKind, NameSource};
 use juicebar_shared::names::{resolve_name, NameCandidates};
-use juicebar_shared::protocols::bytech::{build_request, parse_event, parse_power_answer, Bytech, KeyboardEvent};
+use juicebar_shared::protocols::bytech::{build_request, parse_event, parse_power_answer, with_pushed_percent, Bytech, KeyboardEvent};
 use juicebar_shared::protocols::yuandaxin::{self, Yuandaxin};
 use juicebar_shared::protocols::{BatteryProtocol, Reading};
 use juicebar_shared::report::report_url;
@@ -135,6 +135,19 @@ fn yuandaxin_reads_the_recorded_xs_flow_status() {
     let mut transport = ReplayTransport::from_fixture(&fixture("yuandaxin_xsflow_status.txt"));
     assert_eq!(Yuandaxin.read_battery(&mut transport).unwrap(), Reading::Battery(Battery { percent: 50, is_charging: false }));
     assert!(transport.is_finished());
+}
+
+#[test]
+fn a_battery_push_keeps_charging_from_the_last_power_answer() {
+    // The recorded 71% push, which carries no charging flag the app can read.
+    let Some(KeyboardEvent::Battery(pushed)) = parse_event(&hex_report("13 0a 01 00 04 05 47 01 00 00 00 00 00 00 00 00 00 00 00 6f")) else {
+        panic!("the recorded push should read as a battery event");
+    };
+    let charging = Battery { percent: 64, is_charging: true };
+    assert_eq!(with_pushed_percent(Some(charging), pushed), Battery { percent: 71, is_charging: true });
+    let on_battery = Battery { percent: 64, is_charging: false };
+    assert_eq!(with_pushed_percent(Some(on_battery), pushed), Battery { percent: 71, is_charging: false });
+    assert_eq!(with_pushed_percent(None, pushed), Battery { percent: 71, is_charging: false });
 }
 
 #[test]
