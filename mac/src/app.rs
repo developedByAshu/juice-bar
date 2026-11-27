@@ -202,49 +202,127 @@ fn start_hid_thread() -> Sender<HidJob> {
         if let Some(api) = api.as_ref() {
             api.set_open_exclusive(false);
         }
-        for job in receiver {
-            if let Some(api) = api.as_mut() {
-                let _ = api.refresh_devices();
-            }
-            match job {
-                HidJob::Scan(settings) => {
-                    // The mouse's interface (page 0x0A) opens only with Input Monitoring; ask once, when such a dongle is present.
-                    if let Some(api) = api.as_ref() {
-                        let needs_monitoring = api.device_list().any(|info| info.usage_page() == 0x000A && juicebar_shared::catalog::find_known(info.vendor_id(), info.product_id(), 0x000A).is_some());
-                        if needs_monitoring && !crate::permissions::has_input_monitoring() {
-                            crate::permissions::request_input_monitoring();
-                        }
-                    }
-                    let bluetooth = read_bluetooth_entries();
-                    let scanned = api.as_ref().map_or_else(Vec::new, |api| scan_dongles(api, &settings, &|kind| remembered_bluetooth_names(&bluetooth, kind)));
-                    dispatch2::DispatchQueue::main().exec_async(move || {
-                        with_app(|app| {
-                            app.scanned = scanned;
-                            app.bluetooth = bluetooth;
-                            app.is_scanning = false;
-                            rebuild(app);
-                        });
-                    });
+        // Keyboard dongles held open between scans, so their pushed events (wake, sleep, battery)
+        // arrive as they happen. Waiting on them is the callback; nothing is polled on a timer.
+        let mut watches: Vec<KeyboardWatch> = Vec::new();
+        loop {
+            let job = if watches.is_empty() {
+                match receiver.recv() {
+                    Ok(job) => Some(job),
+                    Err(_) => break,
                 }
-                HidJob::Probe { tag, usb, settings, bluetooth } => {
-                    let Some(api) = api.as_ref() else {
-                        continue;
-                    };
-                    let (reading, protocol) = probe_usb_device(api, &usb);
-                    let device = build_device(&usb, &reading, protocol, &settings, &remembered_bluetooth_names(&bluetooth, usb.kind()));
-                    dispatch2::DispatchQueue::main().exec_async(move || {
-                        with_app(|app| {
-                            if let Some(scanned) = app.scanned.get_mut(tag as usize) {
-                                scanned.device = device;
+            } else {
+                match receiver.try_recv() {
+                    Ok(job) => Some(job),
+                    Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+                }
+            };
+            if let Some(job) = job {
+                if let Some(api) = api.as_mut() {
+                    let _ = api.refresh_devices();
+                }
+                match job {
+                    HidJob::Scan(settings) => {
+                        // The mouse's interface (page 0x0A) opens only with Input Monitoring; ask once, when such a dongle is present.
+                        if let Some(api) = api.as_ref() {
+                            let needs_monitoring = api.device_list().any(|info| info.usage_page() == 0x000A && juicebar_shared::catalog::find_known(info.vendor_id(), info.product_id(), 0x000A).is_some());
+                            if needs_monitoring && !crate::permissions::has_input_monitoring() {
+                                crate::permissions::request_input_monitoring();
                             }
-                            rebuild(app);
+                        }
+                        let bluetooth = read_bluetooth_entries();
+                        let scanned = api.as_ref().map_or_else(Vec::new, |api| scan_dongles(api, &settings, &|kind| remembered_bluetooth_names(&bluetooth, kind)));
+                        watches = api.as_ref().map_or_else(Vec::new, open_keyboard_watches);
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            with_app(|app| {
+                                app.scanned = scanned;
+                                app.bluetooth = bluetooth;
+                                app.is_scanning = false;
+                                rebuild(app);
+                            });
                         });
-                    });
+                    }
+                    HidJob::Probe { tag, usb, settings, bluetooth } => {
+                        let Some(api) = api.as_ref() else {
+                            continue;
+                        };
+                        let (reading, protocol) = probe_usb_device(api, &usb);
+                        let device = build_device(&usb, &reading, protocol, &settings, &remembered_bluetooth_names(&bluetooth, usb.kind()));
+                        dispatch2::DispatchQueue::main().exec_async(move || {
+                            with_app(|app| {
+                                if let Some(scanned) = app.scanned.get_mut(tag as usize) {
+                                    scanned.device = device;
+                                }
+                                rebuild(app);
+                            });
+                        });
+                    }
                 }
             }
+            wait_for_keyboard_events(&mut watches);
         }
     });
     sender
+}
+
+/// A keyboard dongle's command channel, held open to hear what it pushes.
+struct KeyboardWatch {
+    vendor_id: u16,
+    product_id: u16,
+    device: hidapi::HidDevice,
+}
+
+/// How long one pass waits on the held channels before checking for new work, in total.
+const WATCH_WAIT_MS: i32 = 500;
+
+/// Opens (shared) the command channel of every known bytech keyboard dongle that is plugged in.
+fn open_keyboard_watches(api: &hidapi::HidApi) -> Vec<KeyboardWatch> {
+    api.device_list()
+        .filter(|info| juicebar_shared::catalog::find_known(info.vendor_id(), info.product_id(), info.usage_page()).is_some_and(|known| known.protocol == "bytech"))
+        .filter_map(|info| info.open_device(api).ok().map(|device| KeyboardWatch { vendor_id: info.vendor_id(), product_id: info.product_id(), device }))
+        .collect()
+}
+
+/// Waits briefly on the held channels and hands each pushed event to the main thread. A channel that
+/// errors (dongle unplugged) is dropped; the next scan opens it again.
+fn wait_for_keyboard_events(watches: &mut Vec<KeyboardWatch>) {
+    if watches.is_empty() {
+        return;
+    }
+    let wait = WATCH_WAIT_MS / watches.len() as i32;
+    watches.retain(|watch| {
+        let mut buffer = [0u8; 64];
+        match watch.device.read_timeout(&mut buffer, wait) {
+            Ok(size) => {
+                if let Some(event) = juicebar_shared::protocols::bytech::parse_event(&buffer[..size]) {
+                    let (vendor_id, product_id) = (watch.vendor_id, watch.product_id);
+                    dispatch2::DispatchQueue::main().exec_async(move || on_keyboard_event(vendor_id, product_id, event));
+                }
+                true
+            }
+            Err(_) => false,
+        }
+    });
+}
+
+/// Acts on a keyboard event at once: a wake reads the battery now, sleep marks it, a push shows it.
+fn on_keyboard_event(vendor_id: u16, product_id: u16, event: juicebar_shared::protocols::bytech::KeyboardEvent) {
+    use juicebar_shared::protocols::bytech::KeyboardEvent;
+    if event == KeyboardEvent::Awake {
+        refresh();
+        return;
+    }
+    with_app(|app| {
+        let battery = match event {
+            KeyboardEvent::Battery(battery) => Some(battery),
+            _ => None,
+        };
+        for scanned in app.scanned.iter_mut().filter(|scanned| scanned.device.vendor_id == vendor_id && scanned.device.product_id == product_id) {
+            scanned.device.battery = battery;
+        }
+        rebuild(app);
+    });
 }
 
 fn send_hid_job(job: HidJob) {
