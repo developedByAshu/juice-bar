@@ -3,6 +3,7 @@
 //! under section headings. Pages: General, Devices, About.
 
 use crate::canvas::{create_font, mix, Align, Canvas};
+use crate::confirm_sheet::{confirm_click, confirm_hover, confirm_key, dismiss_confirm, is_confirm_open, paint_confirm, show_confirm, SheetFonts};
 use crate::glyph::glass_image;
 use crate::menu_ui::{connection_label, fit_text};
 use crate::messages::WM_APP_SETTINGS_CHANGED;
@@ -29,7 +30,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     PostMessageW, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, CW_USEDEFAULT, ES_AUTOHSCROLL,
     IDC_ARROW, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOW, WM_CHAR, WM_CLOSE, WM_CTLCOLOREDIT, WM_DESTROY, WM_DPICHANGED,
     WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_SETFONT, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE, DLGC_WANTALLKEYS,
+    WM_SETFONT, WM_TIMER, WNDCLASSW, KillTimer, SetTimer, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE, DLGC_WANTALLKEYS,
 };
 
 // Every size below is NetSpeedGauge's (windows/src/settings_ui.rs), at 100% scaling, so the two windows match.
@@ -76,7 +77,10 @@ const APP_TAGLINE: &str = "Battery % of wireless mice and keyboards, in the tray
 const DEVELOPER_NAME: &str = "Ashutosh Anand";
 const DEVELOPER_ORIGIN: &str = "From India";
 const RESET_LABEL: &str = "Reset all";
-const RESET_CONFIRM_LABEL: &str = "Click to confirm";
+// The green "Done" line under Reset stays this long after a reset, as on the Mac.
+const RESET_DONE_MS: u32 = 4_000;
+const RESET_DONE_TIMER: usize = 1;
+const RESET_DONE_TEXT: &str = "Done. Every setting is back to how it started";
 
 /// What Juice Bar does and does not do with data, shown on the About page.
 const PRIVACY_LINES: [&str; 4] = [
@@ -161,6 +165,7 @@ struct Fonts {
     small_icon: HFONT,
     heart: HFONT,
     lock: HFONT,
+    sheet_title: HFONT,
 }
 
 impl Fonts {
@@ -174,6 +179,7 @@ impl Fonts {
             small_icon: create_font(ICON_FONT, 8.0, 400, dpi),
             heart: create_font(ICON_FONT, 9.0, 400, dpi),
             lock: create_font(ICON_FONT, 15.0, 400, dpi),
+            sheet_title: create_font(UI_FONT_STRONG, 12.0, 400, dpi),
         }
     }
 }
@@ -182,7 +188,7 @@ impl Drop for Fonts {
     fn drop(&mut self) {
         // SAFETY: each font was created in new() and is released once here.
         unsafe {
-            for font in [self.body, self.strong, self.small, self.title, self.icon, self.small_icon, self.heart, self.lock] {
+            for font in [self.body, self.strong, self.small, self.title, self.icon, self.small_icon, self.heart, self.lock, self.sheet_title] {
                 DeleteObject(font);
             }
         }
@@ -204,8 +210,8 @@ struct Window {
     /// The rename box and the device it renames, while open.
     edit: Option<(HWND, String)>,
     edit_brush: HBRUSH,
-    /// Reset all was clicked once; the next click on it resets, any other click cancels.
-    is_confirming_reset: bool,
+    /// The green "Done" line shows under Reset for a few seconds after a reset.
+    shows_reset_done: bool,
 }
 
 thread_local! {
@@ -346,8 +352,7 @@ fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
             Block::Setting(Setting::TaskbarPin) => controls.push((Control::PinToggle, row(top))),
             Block::Setting(setting @ (Setting::Hover | Setting::Click)) => controls.extend(segment_rects(canvas, state.fonts.body, setting, right, top, dpi)),
             Block::Setting(Setting::Reset) => {
-                let label = if state.is_confirming_reset { RESET_CONFIRM_LABEL } else { RESET_LABEL };
-                controls.push((Control::Reset, button_rect(canvas, state.fonts.body, label, right, top, dpi)));
+                controls.push((Control::Reset, button_rect(canvas, state.fonts.body, RESET_LABEL, right, top, dpi)));
             }
             Block::Device(index) => {
                 let toggle = toggle_rect(right, top, dpi);
@@ -388,6 +393,9 @@ fn paint(state: &Window, canvas: &mut Canvas) {
     canvas.text(sidebar + scale(MARGIN - 4, dpi), scale(20, dpi), title, state.fonts.title, theme.text, Align::Left);
     draw_sidebar(state, canvas, &controls);
     draw_scrollbar(state, canvas);
+    if is_confirm_open() {
+        paint_confirm(canvas, &state.theme, &sheet_fonts(state), state.dpi, true);
+    }
 }
 
 fn draw_sidebar(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) {
@@ -580,10 +588,14 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                         }
                     }
                     Setting::Reset => {
-                        row_label(canvas, state, text_x, top, "Every setting", "Renames, hidden devices and the check interval", label_room);
+                        if state.shows_reset_done {
+                            canvas.text(text_x, top + scale(7, dpi), "Every setting", fonts.body, theme.text, Align::Left);
+                            canvas.text(text_x, top + scale(27, dpi), &fit_text(canvas, RESET_DONE_TEXT, fonts.small, label_room), fonts.small, GREEN, Align::Left);
+                        } else {
+                            row_label(canvas, state, text_x, top, "Every setting", "Renames, hidden devices and the check interval", label_room);
+                        }
                         if let Some(rect) = rect_of(Control::Reset) {
-                            let label = if state.is_confirming_reset { RESET_CONFIRM_LABEL } else { RESET_LABEL };
-                            draw_button(canvas, state, &rect, label, Control::Reset, false);
+                            draw_button(canvas, state, &rect, RESET_LABEL, Control::Reset, false);
                         }
                     }
                 }
@@ -694,8 +706,6 @@ fn save_and_announce(state: &Window) {
 /// Runs what a control does when clicked or picked from the keyboard.
 fn activate(control: Control) {
     let devices = with_window(|state| device_list(state)).unwrap_or_default();
-    // Any other click cancels a Reset all that waits for its second click, as in NetSpeedGauge.
-    let was_confirming = with_window(|state| std::mem::replace(&mut state.is_confirming_reset, false)).unwrap_or(false);
     match control {
         Control::Nav(page) => {
             close_rename(true);
@@ -752,17 +762,21 @@ fn activate(control: Control) {
         Control::PinToggle => {
             tray_pin::set_pinned(!tray_pin::is_pinned());
         }
-        Control::Reset => {
-            with_window(|state| {
-                if was_confirming {
+        Control::Reset => show_confirm(
+            "Reset every setting?",
+            "Renames, hidden devices, confirmed Bluetooth names and every choice go back to how they were at install. Start with Windows stays as it is.",
+            || {
+                with_window(|state| {
                     // Start with Windows stays as it is: it lives in Windows' own startup list.
                     *state.settings.borrow_mut() = Settings::default();
                     save_and_announce(state);
-                } else {
-                    state.is_confirming_reset = true;
-                }
-            });
-        }
+                    state.shows_reset_done = true;
+                    // SAFETY: a one-shot timer on our own window, stopped when it fires.
+                    unsafe { SetTimer(state.window, RESET_DONE_TIMER, RESET_DONE_MS, None) };
+                });
+                invalidate();
+            },
+        ),
         Control::Rename(index) => {
             if let Some(device) = devices.get(index) {
                 open_rename(index, device);
@@ -845,6 +859,11 @@ fn draw_segments(canvas: &mut Canvas, state: &Window, controls: &[(Control, RECT
             draw_focus(canvas, &theme, rect, dpi);
         }
     }
+}
+
+/// The fonts the Reset confirm card draws with: a strong title and the body text.
+fn sheet_fonts(state: &Window) -> SheetFonts {
+    SheetFonts { title: state.fonts.sheet_title, body: state.fonts.body }
 }
 
 /// Returns the inside colour of a text box, as Windows 11 draws one: darker than the card in dark mode.
@@ -1046,6 +1065,14 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
         WM_ERASEBKGND => 1,
         WM_MOUSEMOVE => {
             let (x, y) = point_of(lparam);
+            if is_confirm_open() {
+                let canvas = client_canvas(window);
+                let changed = with_window(|state| confirm_hover(&canvas, &sheet_fonts(state), state.dpi, x, y)).unwrap_or(false);
+                if changed {
+                    invalidate();
+                }
+                return 0;
+            }
             let control = hit_test(x, y);
             let changed = with_window(|state| {
                 let changed = state.hovered != control;
@@ -1063,14 +1090,16 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
         }
         WM_LBUTTONUP => {
             let (x, y) = point_of(lparam);
-            match hit_test(x, y) {
-                Some(control) => activate(control),
-                None => {
-                    // A click on empty space cancels a Reset all that waits for its second click.
-                    if with_window(|state| std::mem::replace(&mut state.is_confirming_reset, false)) == Some(true) {
-                        invalidate();
-                    }
+            if is_confirm_open() {
+                let canvas = client_canvas(window);
+                if let Some((dpi, fonts)) = with_window(|state| (state.dpi, sheet_fonts(state))) {
+                    confirm_click(&canvas, &fonts, dpi, x, y);
                 }
+                invalidate();
+                return 0;
+            }
+            if let Some(control) = hit_test(x, y) {
+                activate(control);
             }
             0
         }
@@ -1082,6 +1111,11 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
         }
         WM_KEYDOWN => {
             let key = wparam as u16;
+            if is_confirm_open() {
+                confirm_key(key);
+                invalidate();
+                return 0;
+            }
             let shift = GetKeyState(i32::from(VK_SHIFT)) < 0;
             match key {
                 VK_TAB => move_focus(if shift { -1 } else { 1 }),
@@ -1132,7 +1166,14 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
             DestroyWindow(window);
             0
         }
+        WM_TIMER if wparam == RESET_DONE_TIMER => {
+            KillTimer(window, RESET_DONE_TIMER);
+            with_window(|state| state.shows_reset_done = false);
+            invalidate();
+            0
+        }
         WM_DESTROY => {
+            dismiss_confirm();
             if let Some(state) = WINDOW.with(|cell| cell.borrow_mut().take()) {
                 DeleteObject(state.edit_brush);
             }
@@ -1249,7 +1290,7 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
                 scroll: 0,
                 edit: None,
                 edit_brush: CreateSolidBrush(swap_rgb(rename_fill(&theme))),
-                is_confirming_reset: false,
+                shows_reset_done: false,
             });
         });
         ShowWindow(window, SW_SHOW);
@@ -1257,10 +1298,9 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
     }
 }
 
-/// Puts Reset all in its "Click to confirm" state, for screenshots of it.
+/// Opens the Reset confirm card, for screenshots of it.
 pub fn show_reset_confirm() {
-    with_window(|state| state.is_confirming_reset = true);
-    invalidate();
+    activate(Control::Reset);
 }
 
 /// Redraws the open window after a read, so the Devices page shows fresh readings.

@@ -1,8 +1,8 @@
-//! The confirm card that slides over the settings window before anything destructive (Reset). It
-//! stays inside the window, like a sheet on Mac, instead of a separate system dialog box.
+//! The confirm card centred over the settings window before anything destructive (Reset). It stays
+//! inside the window, like the Mac's sheet, with Cancel and a red Reset as the Mac app has them.
 
 use crate::canvas::{Align, Canvas};
-use crate::theme::Theme;
+use crate::theme::{Theme, RED};
 use crate::util::scale;
 use std::cell::RefCell;
 use windows_sys::Win32::Foundation::RECT;
@@ -15,6 +15,7 @@ const BUTTON_HEIGHT: i32 = 32;
 const BUTTON_WIDTH: i32 = 112;
 const BUTTON_GAP: i32 = 8;
 const RADIUS: f32 = 8.0;
+const BUTTON_RADIUS: f32 = 6.0;
 const LINE_GAP: i32 = 4;
 
 /// The two buttons on the card.
@@ -105,8 +106,9 @@ fn layout(canvas: &Canvas, fonts: &SheetFonts, dpi: u32, sheet: &Sheet) -> (RECT
     let card = RECT { left, top, right: left + card_width, bottom: top + card_height };
     let button_width = scale(BUTTON_WIDTH, dpi);
     let button_top = card.bottom - padding - scale(BUTTON_HEIGHT, dpi);
-    let cancel = RECT { left: card.right - padding - button_width, top: button_top, right: card.right - padding, bottom: button_top + scale(BUTTON_HEIGHT, dpi) };
-    let confirm = RECT { left: cancel.left - scale(BUTTON_GAP, dpi) - button_width, top: button_top, right: cancel.left - scale(BUTTON_GAP, dpi), bottom: cancel.bottom };
+    // Cancel on the left and the red Reset on the right, the Mac's order for a destructive choice.
+    let confirm = RECT { left: card.right - padding - button_width, top: button_top, right: card.right - padding, bottom: button_top + scale(BUTTON_HEIGHT, dpi) };
+    let cancel = RECT { left: confirm.left - scale(BUTTON_GAP, dpi) - button_width, top: button_top, right: confirm.left - scale(BUTTON_GAP, dpi), bottom: confirm.bottom };
     (card, confirm, cancel, lines)
 }
 
@@ -130,14 +132,10 @@ pub fn paint_confirm(canvas: &mut Canvas, theme: &Theme, fonts: &SheetFonts, dpi
         for (button, rect, label) in [(SheetButton::Confirm, confirm, sheet.confirm_label.as_str()), (SheetButton::Cancel, cancel, "Cancel")] {
             let is_hovered = sheet.hovered == Some(button);
             let (fill, text) = match button {
-                SheetButton::Confirm => (theme.accent, theme.on_accent),
-                SheetButton::Cancel => (if theme.is_dark { 0x3A3A3A } else { 0xFBFBFB }, theme.text),
+                SheetButton::Confirm => (if is_hovered { crate::canvas::mix(RED, 0x000000, 0.12) } else { RED }, 0xFFFFFF),
+                SheetButton::Cancel => (if is_hovered { theme.button_hover } else { theme.button }, theme.text),
             };
-            let fill = if is_hovered { crate::canvas::mix(fill, if theme.is_dark { 0xFFFFFF } else { 0x000000 }, 0.08) } else { fill };
-            canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 4.0, fill, 1.0);
-            if button == SheetButton::Cancel {
-                canvas.round_outline(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, 4.0, 1.0, theme.border, 1.0);
-            }
+            canvas.round_rect(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top, BUTTON_RADIUS, fill, 1.0);
             if show_focus && sheet.focused == button {
                 let ring = scale(2, dpi);
                 canvas.round_outline(rect.left - ring - 1, rect.top - ring - 1, rect.right - rect.left + 2 * ring + 2, rect.bottom - rect.top + 2 * ring + 2, 6.0, ring as f32, theme.text, 1.0);
