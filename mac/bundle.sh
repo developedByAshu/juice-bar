@@ -22,5 +22,7 @@ if [ -f shared/assets/juicebar.png ]; then
     done
     iconutil -c icns "$icons" -o "$app/Contents/Resources/JuiceBar.icns"
 fi
-codesign --force --sign - "$app"
+# Ad hoc signing pins macOS permissions (Input Monitoring) to this exact build, so every rebuild lost
+# them and the dongles read as offline. A requirement on the bundle id keeps them across rebuilds.
+codesign --force --sign - -r='designated => identifier "com.developedbyashu.juicebar"' "$app"
 echo "Built $root/$app"
