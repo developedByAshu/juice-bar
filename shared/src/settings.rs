@@ -84,6 +84,8 @@ pub struct Settings {
     pub update_check: UpdateCheck,
     /// When the last look happened, in seconds since 1970. Reset all keeps it.
     pub last_update_check: u64,
+    /// The user agreed, once, that Try to detect may send a battery read command to an unknown device.
+    pub is_probe_agreed: bool,
     /// Off in tests and previews, so they never touch the real file.
     pub is_saved_to_disk: bool,
 }
@@ -103,6 +105,7 @@ impl Default for Settings {
             keeps_on_top: false,
             update_check: UpdateCheck::Daily,
             last_update_check: 0,
+            is_probe_agreed: false,
             is_saved_to_disk: true,
         }
     }
@@ -143,6 +146,7 @@ impl Settings {
             format!("keep_on_top={}", u8::from(self.keeps_on_top)),
             format!("update_check={}", self.update_check.number()),
             format!("last_update_check={}", self.last_update_check),
+            format!("probe_agreed={}", u8::from(self.is_probe_agreed)),
         ];
         lines.extend(self.renames.iter().map(|(id, name)| format!("rename.{}={}", clean_key(id), clean_value(name))));
         lines.extend(self.hidden.iter().map(|id| format!("hidden.{}=1", clean_key(id))));
@@ -167,6 +171,7 @@ impl Settings {
                 "keep_on_top" => settings.keeps_on_top = value == "1",
                 "update_check" => settings.update_check = UpdateCheck::from_number(value.parse().unwrap_or(UpdateCheck::Daily.number())),
                 "last_update_check" => settings.last_update_check = value.parse().unwrap_or(0),
+                "probe_agreed" => settings.is_probe_agreed = value == "1",
                 _ => {
                     if let Some(id) = key.strip_prefix("rename.") {
                         settings.renames.insert(clean_key(id), clean_value(value));

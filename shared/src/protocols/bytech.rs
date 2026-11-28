@@ -92,6 +92,10 @@ impl BatteryProtocol for Bytech {
         "bytech"
     }
 
+    fn command_report_id(&self) -> Option<u8> {
+        Some(REPORT_ID)
+    }
+
     fn usage_page(&self) -> u16 {
         0xFF02
     }

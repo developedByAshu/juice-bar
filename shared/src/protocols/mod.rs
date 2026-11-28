@@ -27,6 +27,36 @@ pub trait BatteryProtocol {
     fn usage_page(&self) -> u16;
     /// Asks the device for its battery. Only read commands, never a setting change.
     fn read_battery(&self, transport: &mut dyn HidTransport) -> Result<Reading, String>;
+    /// The report id the protocol sends its read command with, or None when it only listens. The
+    /// opt-in probe sends nothing to an interface whose report descriptor has no such report.
+    fn command_report_id(&self) -> Option<u8> {
+        None
+    }
+}
+
+// A HID report descriptor item: the low two bits of its first byte give its data size, the rest its
+// tag and type. 0x84 is the global Report ID item; 0xFE starts a long item, which carries its own size.
+const ITEM_TAG_MASK: u8 = 0xFC;
+const ITEM_REPORT_ID: u8 = 0x84;
+const ITEM_LONG: u8 = 0xFE;
+
+/// Returns true when a HID report descriptor declares this report id. A broken descriptor gives false.
+pub fn declares_report_id(descriptor: &[u8], report_id: u8) -> bool {
+    let mut index = 0;
+    while let Some(&prefix) = descriptor.get(index) {
+        if prefix == ITEM_LONG {
+            let Some(&size) = descriptor.get(index + 1) else { return false };
+            index += 3 + usize::from(size);
+            continue;
+        }
+        let size = [0, 1, 2, 4][usize::from(prefix & 0x03)];
+        let Some(data) = descriptor.get(index + 1..index + 1 + size) else { return false };
+        if prefix & ITEM_TAG_MASK == ITEM_REPORT_ID && data.first() == Some(&report_id) {
+            return true;
+        }
+        index += 1 + size;
+    }
+    false
 }
 
 /// Returns the protocol for a catalog id.

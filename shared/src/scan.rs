@@ -141,13 +141,33 @@ pub fn scan_dongles(api: &hidapi::HidApi, settings: &Settings, bluetooth_names: 
         .collect()
 }
 
-/// Tries every protocol's battery read on the device's vendor interfaces. Runs only when the user clicks Try to detect.
+/// The one-time question before the first Try to detect, the same on Mac and Windows.
+pub const PROBE_QUESTION: &str = "Send a battery read command to this device?";
+pub const PROBE_DETAIL: &str = "Try to detect sends the battery read command of each keyboard and mouse Juice Bar knows to this device's vendor channel, and listens for an answer. It only asks and never changes a setting, but the device is not one Juice Bar knows. Juice Bar asks this once.";
+
+/// Far above any real report descriptor; HID caps them at 4096 bytes.
+const DESCRIPTOR_BUFFER_BYTES: usize = 4096;
+
+/**
+ * Tries every protocol's battery read on the device's vendor interfaces. Runs only when the user
+ * clicks Try to detect and has agreed to it once. A protocol that sends a command sends it only to an
+ * interface whose report descriptor declares that command's report id; when the descriptor cannot be
+ * read, the usage page alone decides, as before.
+ */
 pub fn probe_usb_device(api: &hidapi::HidApi, device: &UsbDevice) -> (Reading, Option<&'static str>) {
     for protocol in crate::protocols::all_protocols() {
         for (_, path) in device.interfaces.iter().filter(|(summary, _)| summary.usage_page == protocol.usage_page()) {
             let Ok(opened) = api.open_path(path) else {
                 continue;
             };
+            if let Some(report_id) = protocol.command_report_id() {
+                let mut descriptor = vec![0u8; DESCRIPTOR_BUFFER_BYTES];
+                if let Ok(length) = opened.get_report_descriptor(&mut descriptor) {
+                    if length > 0 && !crate::protocols::declares_report_id(&descriptor[..length.min(DESCRIPTOR_BUFFER_BYTES)], report_id) {
+                        continue;
+                    }
+                }
+            }
             let mut transport = HidapiTransport { device: opened };
             if let Ok(Reading::Battery(battery)) = protocol.read_battery(&mut transport) {
                 return (Reading::Battery(battery), Some(protocol.id()));
