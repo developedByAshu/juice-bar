@@ -83,28 +83,38 @@ Juice Bar asks the devices directly and puts the answer where you already look.
 
 ## Install
 
-### Mac (Apple silicon only)
+Takes about a minute.
 
-1. Download `JuiceBar-mac-arm64.zip` from [Releases](https://github.com/developedByAshu/juice-bar/releases/latest) and unzip it.
-2. Move `JuiceBar` to Applications, then open it.
-3. macOS blocks it the first time because the app is not signed by Apple. Open **System Settings**, **Privacy & Security**, choose **Open Anyway**, then open it again.
-4. If macOS asks for **Input Monitoring**, allow it. Some dongles only answer once it is on.
+**Mac** (Apple silicon)
 
-### Windows
+1. Download [`JuiceBar-mac-arm64.zip`](https://github.com/developedByAshu/juice-bar/releases/latest) and open it.
+2. Drag **Juice Bar** to **Applications**, then open it.
+3. Blocked the first time? Open **System Settings**, **Privacy & Security**, then **Open Anyway**.
+4. Asked for **Input Monitoring**? Allow it. Some dongles only answer once it is on.
 
-1. Download `JuiceBar-x64.exe` from [Releases](https://github.com/developedByAshu/juice-bar/releases/latest). On a Windows on ARM PC, take `JuiceBar-arm64.exe`.
-2. Put it in a folder you will keep, then run it.
-3. Windows may show a SmartScreen warning because the program is not code signed yet. Choose **More info**, then **Run anyway**.
+**Windows**
 
-`SHA256SUMS.txt` in each release lets you check the file.
+1. Download [`JuiceBar-x64.exe`](https://github.com/developedByAshu/juice-bar/releases/latest) (`JuiceBar-arm64.exe` on an ARM PC).
+2. Run it.
+3. SmartScreen warning? Choose **More info**, then **Run anyway**.
 
-Juice Bar checks GitHub daily by default (on launch, daily, weekly, monthly or **Never**, in Settings). It installs a new version only when the release carries the project's signature, and only after you click **Install**. No need to replace the app by hand.
+Updates install themselves: the app asks you first and checks our signature.
 
-## Check your download
+<details>
+<summary><b>Update checks and where to keep the app</b></summary>
+<br>
 
-Every release lists each file's SHA-256 in `SHA256SUMS.txt`, and that list is signed with the project's offline key. The app checks this itself before installing any update. For the first download you can check it by hand. You need OpenSSL 3: `brew install openssl` on Mac, and Git for Windows already includes it.
+- Juice Bar checks for updates daily by default. Choose launch, daily, weekly, monthly or **Never** in Settings.
+- An update installs only if it carries the project's signature, and only after you click **Install**.
+- Keep the Windows file in a folder you will keep, since it runs from there.
 
-In Terminal (Mac) or Git Bash (Windows), in the folder with your download, set `TAG` to the release you downloaded:
+</details>
+
+<details>
+<summary><b>Check your download (optional)</b></summary>
+<br>
+
+The app checks every update itself. This checks your first download by hand. You need OpenSSL 3 (`brew install openssl` on Mac, included in Git for Windows). Run it in the folder with your download, with `TAG` set to its release:
 
 ```sh
 TAG=v0.2.2
@@ -118,16 +128,26 @@ tr -d '\r' < SHA256SUMS.txt | shasum -a 256 -c --ignore-missing
 
 Both must pass: `Signature Verified Successfully`, then `OK` beside your file. If either fails, do not open the file and please [open an issue](https://github.com/developedByAshu/juice-bar/issues).
 
-## Works on
+</details>
+
+<details>
+<summary><b>Works on</b></summary>
+<br>
 
 Tested on macOS 27 with Apple silicon and on Windows 11. There is no version for Intel Macs. If something breaks, [open an issue](https://github.com/developedByAshu/juice-bar/issues).
 
-## Privacy
+</details>
+
+<details>
+<summary><b>Privacy</b></summary>
+<br>
 
 - The update check is the only time Juice Bar goes online. Set it to **Never** and it makes no connections at all.
 - That check sends only the app's name. GitHub sees your IP address, as any website does.
 - Battery readings, device names and settings stay on your computer. No account, tracking, ads or server.
 - The code is all here, so you can check it yourself.
+
+</details>
 
 ## Common questions
 
@@ -151,11 +171,11 @@ Tested on macOS 27 with Apple silicon and on Windows 11. There is no version for
 <br>Turn off <b>Open at login</b> on Mac or <b>Start with Windows</b> on Windows, quit it, then delete the app and its settings folder: <code>~/Library/Application Support/JuiceBar</code> on Mac, <code>%APPDATA%\JuiceBar</code> on Windows.
 </details>
 
-## Build it yourself
-
 <details>
-<summary><b>Build from source</b></summary>
-<br>You need Rust, plus the Xcode command line tools on Mac or the Visual Studio C++ build tools on Windows.
+<summary><b>Build it yourself</b></summary>
+<br>
+
+You need Rust, plus the Xcode command line tools on Mac or the Visual Studio C++ build tools on Windows.
 
 ```sh
 cargo test -p juicebar-shared              # replays recorded device answers, no hardware needed
@@ -165,6 +185,7 @@ JUICEBAR_DEMO=1 cargo run -p juicebar-mac --bin JuiceBar   # sample devices, deb
 ```
 
 `shared/` holds devices, protocols, names, colours and settings. `mac/` and `windows/` only draw, with the same file and function names on both sides (`docs/CONTRACT.md`).
+
 </details>
 
 ## Licence
