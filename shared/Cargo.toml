@@ -12,3 +12,4 @@ path = "src/lib.rs"
 
 [dependencies]
 hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
+sha2 = { version = "0.10", default-features = false }

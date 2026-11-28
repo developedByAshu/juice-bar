@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::update::UpdateCheck;
+
 const FILE_NAME: &str = "settings.txt";
 const TEMP_FILE_NAME: &str = "settings.txt.tmp";
 
@@ -10,6 +12,8 @@ const TEMP_FILE_NAME: &str = "settings.txt.tmp";
 pub const MENU_FONT_POINTS_DEFAULT: u32 = 9;
 pub const MENU_FONT_POINTS_MIN: u32 = 7;
 pub const MENU_FONT_POINTS_MAX: u32 = 12;
+/// The window theme's last choice, dark.
+pub const MAX_WINDOW_THEME: u8 = 2;
 
 /// What resting the pointer on the icon does, as NetSpeedGauge's "On hover".
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -72,6 +76,14 @@ pub struct Settings {
     pub hidden: Vec<String>,
     /// Device id to the Bluetooth name the user confirmed for it.
     pub confirmed_bluetooth_names: BTreeMap<String, String>,
+    /// Juice Bar's own windows: 0 same as the system, 1 light, 2 dark, as NetSpeedGauge's window_theme.
+    pub window_theme: u8,
+    /// Settings stays above other apps.
+    pub keeps_on_top: bool,
+    /// How often to look for a new release.
+    pub update_check: UpdateCheck,
+    /// When the last look happened, in seconds since 1970. Reset all keeps it.
+    pub last_update_check: u64,
     /// Off in tests and previews, so they never touch the real file.
     pub is_saved_to_disk: bool,
 }
@@ -87,6 +99,10 @@ impl Default for Settings {
             renames: BTreeMap::new(),
             hidden: Vec::new(),
             confirmed_bluetooth_names: BTreeMap::new(),
+            window_theme: 0,
+            keeps_on_top: false,
+            update_check: UpdateCheck::Daily,
+            last_update_check: 0,
             is_saved_to_disk: true,
         }
     }
@@ -110,6 +126,10 @@ impl Settings {
             format!("menu_font_points={}", self.menu_font_points),
             format!("hover_action={}", self.hover_action.number()),
             format!("click_action={}", self.click_action.number()),
+            format!("window_theme={}", self.window_theme),
+            format!("keep_on_top={}", u8::from(self.keeps_on_top)),
+            format!("update_check={}", self.update_check.number()),
+            format!("last_update_check={}", self.last_update_check),
         ];
         lines.extend(self.renames.iter().map(|(id, name)| format!("rename.{id}={name}")));
         lines.extend(self.hidden.iter().map(|id| format!("hidden.{id}=1")));
@@ -130,6 +150,10 @@ impl Settings {
                 }
                 "hover_action" => settings.hover_action = HoverAction::from_number(value.parse().unwrap_or(0)),
                 "click_action" => settings.click_action = ClickAction::from_number(value.parse().unwrap_or(0)),
+                "window_theme" => settings.window_theme = value.parse::<u8>().unwrap_or(0).min(MAX_WINDOW_THEME),
+                "keep_on_top" => settings.keeps_on_top = value == "1",
+                "update_check" => settings.update_check = UpdateCheck::from_number(value.parse().unwrap_or(UpdateCheck::Daily.number())),
+                "last_update_check" => settings.last_update_check = value.parse().unwrap_or(0),
                 _ => {
                     if let Some(id) = key.strip_prefix("rename.") {
                         settings.renames.insert(id.to_string(), value.to_string());
@@ -142,6 +166,20 @@ impl Settings {
             }
         }
         settings
+    }
+
+    /// Puts the Appearance page's choices back to their defaults, for its "Reset this page" row.
+    pub fn reset_appearance(&mut self) {
+        let defaults = Self::default();
+        self.shows_percent_in_icon = defaults.shows_percent_in_icon;
+        self.menu_font_points = defaults.menu_font_points;
+        self.window_theme = defaults.window_theme;
+    }
+
+    /// Puts every choice back to its default, keeping when updates were last checked.
+    pub fn reset_all(&mut self) {
+        let is_saved_to_disk = self.is_saved_to_disk;
+        *self = Self { last_update_check: self.last_update_check, is_saved_to_disk, ..Self::default() };
     }
 
     /// Loads the saved choices, or the defaults when there are none yet.
