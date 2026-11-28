@@ -16,7 +16,7 @@ Windows makes it on its own branch and says so), never both at once.
 | 4 | `names` | `resolve_name(kind, &NameCandidates)`; apps fill `bluetooth_memory` from their `bluetooth.rs` |
 | 5 | `settings` | `Settings::load`, `save`, `data_folder` (Application Support / %APPDATA%\JuiceBar) |
 | 6 | `report` | `report_url(device, interfaces, os, version)`; apps open it in the browser |
-| 7 | `demo` | `is_demo_mode()` (env `JUICEBAR_DEMO=1`), `sample_devices(keyboard, mouse)` for UI work without dongles |
+| 7 | `demo` | `is_demo_mode()` (env `JUICEBAR_DEMO=1`, debug builds only), `sample_devices(keyboard, mouse)` for UI work without dongles |
 | 8 | `protocols` | `protocol_by_id`, `all_protocols` (probe), `Reading`; fixtures in `shared/tests/fixtures` replay without hardware |
 
 Tone colours, same values on both (sRGB): Green `#34C759`, Amber `#FF9F0A`, Red `#FF453A`

@@ -21,8 +21,9 @@ Battery % of your wireless mouse and keyboard, in the Mac menu bar and the Windo
 | 3 | Any mouse or keyboard macOS / Windows reports over Bluetooth | Bluetooth | Reads % from the OS |
 
 Not listed? Right click (or ⌥-click) the device in the menu, then **Report**. It opens a prefilled GitHub issue
-with only the device's ids, so support can be added. **Try to detect** asks the device in every
-known protocol, only when you click it.
+with only the device's ids and its USB product name (never your rename), which you see before
+sending, so support can be added. **Try to detect** sends the battery read command of every known
+protocol to the device, only when you click it, and asks you once before the first time.
 
 ## Install
 
@@ -30,13 +31,27 @@ Download from Releases: `JuiceBar-mac-arm64.zip` (Apple Silicon), `JuiceBar-x64.
 `JuiceBar-arm64.exe`. On Mac, macOS may ask for **Input Monitoring**: some dongles (the Hawk Pro
 family) only answer once it is allowed.
 
+## Updates
+
+Juice Bar checks GitHub for a new release, daily by default (Settings, **Check for updates**: on
+launch, daily, weekly, monthly or never). A new version is installed only when the release's
+checksums carry the project's signature, and only after you click **Install** when it asks; **Later**
+asks again at the next check. No need to download and replace the app by hand.
+
+## Privacy
+
+The update check is the only time Juice Bar goes online. It sends only the app's name as the
+User-Agent; GitHub sees your IP address, as with any download. Set **Check for updates** to
+**Never** and Juice Bar makes no internet connections at all. Nothing else leaves your computer:
+battery readings, device names and settings stay on it. **Report** only opens a page in your browser.
+
 ## Build
 
 ```sh
 cargo test -p juicebar-shared       # protocols replay recorded device answers, no hardware needed
-./mac/bundle.sh                     # target/mac/JuiceBar.app
+./mac/bundle.sh                     # target/mac/JuiceBar.app, signed with MAC_SIGN_IDENTITY when present
 cargo build --release -p juicebar-windows
-JUICEBAR_DEMO=1 ./target/mac/JuiceBar.app/Contents/MacOS/JuiceBar   # sample devices, for UI work
+JUICEBAR_DEMO=1 cargo run -p juicebar-mac --bin JuiceBar   # sample devices, for UI work (debug builds only)
 ```
 
 Layout: `shared/` holds devices, protocols, names, colours and settings; `mac/` and `windows/` only
