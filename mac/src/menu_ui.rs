@@ -347,7 +347,10 @@ impl MenuRowView {
         if let Some(forced) = FORCED_HIGHLIGHT.with(Cell::get) {
             return forced == self.ivars().index;
         }
-        self.ivars().is_mouse_inside.get() && self.row_item().is_some_and(|(_, item)| item.isEnabled())
+        // The header, empty and spacer rows never highlight: their hidden items are never validated, so
+        // they read as enabled, and the 5 pt spacer drew the hover fill as a thin bar under the last row.
+        let can_highlight = matches!(self.ivars().row, MenuRow::Device(_) | MenuRow::Settings | MenuRow::Quit);
+        can_highlight && self.ivars().is_mouse_inside.get() && self.row_item().is_some_and(|(_, item)| item.isEnabled())
     }
 
     fn draw(&self) {
