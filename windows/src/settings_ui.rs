@@ -1,6 +1,6 @@
 //! The settings window, laid out exactly like NetSpeedGauge's: a tinted sidebar with the app name,
 //! the page list and the "Made in India" line, and the chosen page on the right in rounded rows
-//! under section headings. Pages: General, Devices, About.
+//! under section headings. Pages: General, Appearance, Devices, Advanced, About.
 
 use crate::canvas::{create_font, mix, Align, Canvas};
 use crate::confirm_sheet::{confirm_click, confirm_hover, confirm_key, dismiss_confirm, is_confirm_open, paint_confirm, show_confirm, SheetFonts};
@@ -13,7 +13,7 @@ use crate::tray_pin;
 use crate::theme::{apply_window_look, current_theme, draw_made_with_love, on_theme_change, Backdrop, Theme, GREEN, ICON_FONT, UI_FONT, UI_FONT_STRONG};
 use crate::util::{scale, to_wide};
 use juicebar_shared::device::{Device, NameSource};
-use juicebar_shared::settings::{ClickAction, HoverAction, Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
+use juicebar_shared::settings::{ClickAction, HoverAction, Settings, MAX_WINDOW_THEME, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -28,9 +28,9 @@ use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWi
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetClientRect, GetWindowTextLengthW, GetWindowTextW, IsWindow, LoadCursorW, LoadIconW,
     PostMessageW, RegisterClassW, SendMessageW, SetForegroundWindow, SetWindowPos, ShowWindow, CW_USEDEFAULT, ES_AUTOHSCROLL,
-    IDC_ARROW, SWP_NOACTIVATE, SWP_NOZORDER, SW_RESTORE, SW_SHOW, WM_CHAR, WM_CLOSE, WM_CTLCOLOREDIT, WM_DESTROY, WM_DPICHANGED,
+    HWND_NOTOPMOST, HWND_TOPMOST, IDC_ARROW, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER, SW_RESTORE, SW_SHOW, WM_CHAR, WM_CLOSE, WM_CTLCOLOREDIT, WM_DESTROY, WM_DPICHANGED,
     WM_ERASEBKGND, WM_GETDLGCODE, WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_SETFONT, WM_TIMER, WNDCLASSW, KillTimer, SetTimer, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE, DLGC_WANTALLKEYS,
+    WM_SETFONT, WM_TIMER, WNDCLASSW, KillTimer, SetTimer, WS_CAPTION, WS_CHILD, WS_EX_APPWINDOW, WS_EX_TOPMOST, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_VISIBLE, DLGC_WANTALLKEYS,
 };
 
 // Every size below is NetSpeedGauge's (windows/src/settings_ui.rs), at 100% scaling, so the two windows match.
@@ -83,6 +83,8 @@ const APP_TAGLINE: &str = "Battery % of wireless mice and keyboards, in the tray
 const DEVELOPER_NAME: &str = "Ashutosh Anand";
 const DEVELOPER_ORIGIN: &str = "From India";
 const RESET_LABEL: &str = "Reset all";
+const RESET_PAGE_LABEL: &str = "Reset";
+const RESET_PAGE_DONE_TEXT: &str = "Done. Appearance is back to its default.";
 // The green "Done" line under Reset stays this long after a reset, as on the Mac.
 const RESET_DONE_MS: u32 = 4_000;
 const RESET_DONE_TIMER: usize = 1;
@@ -132,10 +134,12 @@ enum Control {
     MenuTextMore,
     PercentToggle,
     PinToggle,
+    OnTopToggle,
     /// One option of a segmented choice: the row and the option's number.
     Choice(Setting, u8),
     StartupToggle,
     Reset,
+    ResetPage,
     Rename(usize),
     RenameSave(usize),
     RenameCancel(usize),
@@ -143,16 +147,19 @@ enum Control {
     ConfirmName(usize),
 }
 
-/// One row of the General page.
+/// One settings row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Setting {
     Poll,
     MenuText,
     Percent,
     TaskbarPin,
+    Theme,
     Hover,
     Click,
+    OnTop,
     Startup,
+    ResetPage,
     Reset,
 }
 
@@ -223,8 +230,8 @@ struct Window {
     /// The rename box and the device it renames, while open.
     edit: Option<(HWND, String)>,
     edit_brush: HBRUSH,
-    /// The green "Done" line shows under Reset for a few seconds after a reset.
-    shows_reset_done: bool,
+    /// The reset row that shows the green "Done" line for a few seconds after its reset.
+    reset_done: Option<Setting>,
     /// The device whose rename was just saved; its row shows a green "Saved" line for a moment.
     saved_id: Option<String>,
 }
@@ -261,6 +268,9 @@ fn page_blocks(state: &Window) -> Vec<Block> {
     match state.page {
         Page::General => vec![Block::Section("Startup"), Block::Setting(Setting::Startup), Block::Section("Battery checks"), Block::Setting(Setting::Poll)],
         Page::Appearance => vec![
+            // NetSpeedGauge's Appearance page opens with the same Theme row.
+            Block::Section("Theme"),
+            Block::Setting(Setting::Theme),
             Block::Section("Tray icon"),
             Block::Setting(Setting::Percent),
             Block::Setting(Setting::TaskbarPin),
@@ -271,7 +281,9 @@ fn page_blocks(state: &Window) -> Vec<Block> {
             Block::Section("Behaviour"),
             Block::Setting(Setting::Hover),
             Block::Setting(Setting::Click),
+            Block::Setting(Setting::OnTop),
             Block::Section("Reset"),
+            Block::Setting(Setting::ResetPage),
             Block::Setting(Setting::Reset),
         ],
         Page::Devices => {
@@ -370,9 +382,13 @@ fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
             Block::Setting(Setting::Percent) => controls.push((Control::PercentToggle, row(top))),
             Block::Setting(Setting::Startup) => controls.push((Control::StartupToggle, row(top))),
             Block::Setting(Setting::TaskbarPin) => controls.push((Control::PinToggle, row(top))),
-            Block::Setting(setting @ (Setting::Hover | Setting::Click)) => controls.extend(segment_rects(canvas, state.fonts.body, setting, right, top, dpi)),
+            Block::Setting(Setting::OnTop) => controls.push((Control::OnTopToggle, row(top))),
+            Block::Setting(setting @ (Setting::Hover | Setting::Click | Setting::Theme)) => controls.extend(segment_rects(canvas, state.fonts.body, setting, right, top, dpi)),
             Block::Setting(Setting::Reset) => {
                 controls.push((Control::Reset, button_rect(canvas, state.fonts.body, RESET_LABEL, right, top, dpi)));
+            }
+            Block::Setting(Setting::ResetPage) => {
+                controls.push((Control::ResetPage, button_rect(canvas, state.fonts.body, RESET_PAGE_LABEL, right, top, dpi)));
             }
             Block::Device(index) => {
                 let toggle = toggle_rect(right, top, dpi);
@@ -564,8 +580,9 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                     Setting::Poll => rect_of(Control::PollLess).map_or(right, |rect| rect.left),
                     Setting::MenuText => rect_of(Control::MenuTextLess).map_or(right, |rect| rect.left),
                     Setting::Reset => rect_of(Control::Reset).map_or(right, |rect| rect.left),
-                    Setting::Percent | Setting::Startup | Setting::TaskbarPin => toggle_rect(right, top, dpi).left,
-                    Setting::Hover | Setting::Click => rect_of(Control::Choice(setting, 0)).map_or(right, |rect| rect.left),
+                    Setting::ResetPage => rect_of(Control::ResetPage).map_or(right, |rect| rect.left),
+                    Setting::Percent | Setting::Startup | Setting::TaskbarPin | Setting::OnTop => toggle_rect(right, top, dpi).left,
+                    Setting::Hover | Setting::Click | Setting::Theme => rect_of(Control::Choice(setting, 0)).map_or(right, |rect| rect.left),
                 };
                 let label_room = control_left - scale(14, dpi) - text_x;
                 match setting {
@@ -576,11 +593,11 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                             draw_stepper(canvas, state, (Control::PollLess, Control::PollMore), &less, &more, &format!("{minutes} min"), minutes > MIN_POLL_MINUTES, minutes < MAX_POLL_MINUTES);
                         }
                     }
-                    Setting::Hover | Setting::Click => {
-                        let (label, hint, chosen) = if setting == Setting::Hover {
-                            ("On hover", "When the pointer rests on the icon", settings.hover_action.number())
-                        } else {
-                            ("On click", "Right-click opens Settings and Quit", u8::from(settings.click_action == ClickAction::Settings))
+                    Setting::Hover | Setting::Click | Setting::Theme => {
+                        let (label, hint, chosen) = match setting {
+                            Setting::Hover => ("On hover", "When the pointer rests on the icon", settings.hover_action.number()),
+                            Setting::Click => ("On click", "Right-click opens Settings and Quit", u8::from(settings.click_action == ClickAction::Settings)),
+                            _ => ("Juice Bar windows", "", settings.window_theme),
                         };
                         row_label(canvas, state, text_x, top, label, hint, label_room);
                         draw_segments(canvas, state, controls, setting, chosen);
@@ -592,13 +609,12 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                             draw_stepper(canvas, state, (Control::MenuTextLess, Control::MenuTextMore), &less, &more, &format!("{points} pt"), points > MENU_FONT_POINTS_MIN, points < MENU_FONT_POINTS_MAX);
                         }
                     }
-                    Setting::Percent | Setting::Startup | Setting::TaskbarPin => {
-                        let (label, hint, is_on, control) = if setting == Setting::Percent {
-                            ("Show the lowest % in the icon", "Shows the number instead of the juice glass", settings.shows_percent_in_icon, Control::PercentToggle)
-                        } else if setting == Setting::TaskbarPin {
-                            ("Show on the taskbar", "Keeps the icon next to the clock, not under the ^ arrow", tray_pin::is_pinned(), Control::PinToggle)
-                        } else {
-                            ("Start with Windows", "Opens Juice Bar when you sign in", startup::is_enabled(), Control::StartupToggle)
+                    Setting::Percent | Setting::Startup | Setting::TaskbarPin | Setting::OnTop => {
+                        let (label, hint, is_on, control) = match setting {
+                            Setting::Percent => ("Show the lowest % in the icon", "Shows the number instead of the juice glass", settings.shows_percent_in_icon, Control::PercentToggle),
+                            Setting::TaskbarPin => ("Show on the taskbar", "Keeps the icon next to the clock, not under the ^ arrow", tray_pin::is_pinned(), Control::PinToggle),
+                            Setting::OnTop => ("Keep windows on top", "Settings stays above other apps", settings.keeps_on_top, Control::OnTopToggle),
+                            _ => ("Start with Windows", "Opens Juice Bar when you sign in", startup::is_enabled(), Control::StartupToggle),
                         };
                         row_label(canvas, state, text_x, top, label, hint, label_room);
                         let toggle = toggle_rect(right, top, dpi);
@@ -607,17 +623,23 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                             draw_focus(canvas, &theme, &toggle, dpi);
                         }
                     }
-                    Setting::Reset => {
-                        if state.shows_reset_done {
-                            canvas.text(text_x, top + scale(7, dpi), "Every setting", fonts.body, theme.text, Align::Left);
+                    Setting::Reset | Setting::ResetPage => {
+                        let (label, hint, done_text, button, control) = if setting == Setting::Reset {
+                            ("Every setting", "Renames, hidden devices and the check interval", RESET_DONE_TEXT, RESET_LABEL, Control::Reset)
+                        } else {
+                            // NetSpeedGauge's "Reset this page" row, for Juice Bar's one page of looks.
+                            ("Appearance", "Back to how Juice Bar started", RESET_PAGE_DONE_TEXT, RESET_PAGE_LABEL, Control::ResetPage)
+                        };
+                        if state.reset_done == Some(setting) {
+                            canvas.text(text_x, top + scale(7, dpi), label, fonts.body, theme.text, Align::Left);
                             let good = if theme.is_dark { GOOD_DARK } else { GOOD_LIGHT };
                             canvas.text(text_x, top + scale(29, dpi), ICON_DONE, fonts.small_icon, good, Align::Left);
-                            canvas.text(text_x + scale(14, dpi), top + scale(27, dpi), &fit_text(canvas, RESET_DONE_TEXT, fonts.small, label_room - scale(14, dpi)), fonts.small, good, Align::Left);
+                            canvas.text(text_x + scale(14, dpi), top + scale(27, dpi), &fit_text(canvas, done_text, fonts.small, label_room - scale(14, dpi)), fonts.small, good, Align::Left);
                         } else {
-                            row_label(canvas, state, text_x, top, "Every setting", "Renames, hidden devices and the check interval", label_room);
+                            row_label(canvas, state, text_x, top, label, hint, label_room);
                         }
-                        if let Some(rect) = rect_of(Control::Reset) {
-                            draw_button(canvas, state, &rect, RESET_LABEL, Control::Reset, false);
+                        if let Some(rect) = rect_of(control) {
+                            draw_button(canvas, state, &rect, button, control, false);
                         }
                     }
                 }
@@ -722,6 +744,20 @@ fn save_and_announce(state: &Window) {
     unsafe { PostMessageW(state.owner, WM_APP_SETTINGS_CHANGED, 0, 0) };
 }
 
+/// Shows the green "Done" line under a reset row for a few seconds.
+fn show_reset_done(state: &mut Window, row: Setting) {
+    state.reset_done = Some(row);
+    // SAFETY: a one-shot timer on our own window, stopped when it fires; setting it again restarts it.
+    unsafe { SetTimer(state.window, RESET_DONE_TIMER, RESET_DONE_MS, None) };
+}
+
+/// Keeps the window above other apps or lets it sit among them, as NetSpeedGauge's "Keep windows on top".
+fn set_on_top(window: HWND, keeps_on_top: bool) {
+    let after = if keeps_on_top { HWND_TOPMOST } else { HWND_NOTOPMOST };
+    // SAFETY: the window is alive while it is stored; only its place in the stack changes.
+    unsafe { SetWindowPos(window, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE) };
+}
+
 /// Runs what a control does when clicked or picked from the keyboard.
 fn activate(control: Control) {
     let devices = with_window(|state| device_list(state)).unwrap_or_default();
@@ -769,10 +805,10 @@ fn activate(control: Control) {
             with_window(|state| {
                 {
                     let mut settings = state.settings.borrow_mut();
-                    if setting == Setting::Hover {
-                        settings.hover_action = HoverAction::from_number(option);
-                    } else {
-                        settings.click_action = if option == 1 { ClickAction::Settings } else { ClickAction::Devices };
+                    match setting {
+                        Setting::Hover => settings.hover_action = HoverAction::from_number(option),
+                        Setting::Theme => settings.window_theme = option.min(MAX_WINDOW_THEME),
+                        _ => settings.click_action = if option == 1 { ClickAction::Settings } else { ClickAction::Devices },
                     }
                 }
                 save_and_announce(state);
@@ -781,6 +817,24 @@ fn activate(control: Control) {
         Control::PinToggle => {
             tray_pin::set_pinned(!tray_pin::is_pinned());
         }
+        Control::OnTopToggle => {
+            with_window(|state| {
+                let keeps_on_top = {
+                    let mut settings = state.settings.borrow_mut();
+                    settings.keeps_on_top = !settings.keeps_on_top;
+                    settings.keeps_on_top
+                };
+                set_on_top(state.window, keeps_on_top);
+                save_and_announce(state);
+            });
+        }
+        Control::ResetPage => {
+            with_window(|state| {
+                state.settings.borrow_mut().reset_appearance();
+                save_and_announce(state);
+                show_reset_done(state, Setting::ResetPage);
+            });
+        }
         Control::Reset => show_confirm(
             "Reset every setting?",
             "Every choice and rename goes back to how Juice Bar started.
@@ -788,11 +842,10 @@ Start with Windows stays as it is.",
             || {
                 with_window(|state| {
                     // Start with Windows stays as it is: it lives in Windows' own startup list.
-                    *state.settings.borrow_mut() = Settings::default();
+                    state.settings.borrow_mut().reset_all();
+                    set_on_top(state.window, false);
                     save_and_announce(state);
-                    state.shows_reset_done = true;
-                    // SAFETY: a one-shot timer on our own window, stopped when it fires.
-                    unsafe { SetTimer(state.window, RESET_DONE_TIMER, RESET_DONE_MS, None) };
+                    show_reset_done(state, Setting::Reset);
                 });
                 invalidate();
             },
@@ -833,7 +886,12 @@ Start with Windows stays as it is.",
 
 /// The options of a segmented choice, as NetSpeedGauge's "On hover" and "On click" rows offer them.
 fn segment_options(setting: Setting) -> &'static [&'static str] {
-    if setting == Setting::Hover { &["Nothing", "Battery card"] } else { &["Devices", "Settings"] }
+    match setting {
+        Setting::Hover => &["Nothing", "Battery card"],
+        // NetSpeedGauge's window theme options, in its order: 0 system, 1 light, 2 dark.
+        Setting::Theme => &["Same as system", "Light", "Dark"],
+        _ => &["Devices", "Settings"],
+    }
 }
 
 /// Returns each option's rectangle of a segmented choice ending at the right edge, NetSpeedGauge's sizes.
@@ -1233,7 +1291,7 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
         }
         WM_TIMER if wparam == RESET_DONE_TIMER => {
             KillTimer(window, RESET_DONE_TIMER);
-            with_window(|state| state.shows_reset_done = false);
+            with_window(|state| state.reset_done = None);
             invalidate();
             0
         }
@@ -1322,9 +1380,10 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
     unsafe {
         let dpi = GetDpiForSystem().max(96);
         let mut frame = RECT { left: 0, top: 0, right: scale(WIDTH, dpi), bottom: scale(HEIGHT, dpi) };
-        AdjustWindowRectExForDpi(&mut frame, style, 0, WS_EX_APPWINDOW, dpi);
+        let on_top = if settings.borrow().keeps_on_top { WS_EX_TOPMOST } else { 0 };
+        AdjustWindowRectExForDpi(&mut frame, style, 0, WS_EX_APPWINDOW | on_top, dpi);
         let window = CreateWindowExW(
-            WS_EX_APPWINDOW,
+            WS_EX_APPWINDOW | on_top,
             class_name.as_ptr(),
             title.as_ptr(),
             style,
@@ -1355,7 +1414,7 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
                 scroll: 0,
                 edit: None,
                 edit_brush: CreateSolidBrush(swap_rgb(field_fill(&theme))),
-                shows_reset_done: false,
+                reset_done: None,
                 saved_id: None,
             });
         });

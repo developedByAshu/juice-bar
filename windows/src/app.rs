@@ -10,6 +10,7 @@ use crate::menu_ui::{close_hover_card, close_menu, is_menu_open, refresh_menu, s
 use crate::messages::{WM_APP_KEYBOARD_EVENT, WM_APP_SCAN_DONE};
 use crate::settings_ui::{close_settings, open_settings, refresh_settings};
 use crate::status_icon::{create_status_icon, set_tooltip, update_status_icon, use_hover_card};
+use crate::theme::{notify_theme_change, set_theme_choice};
 use crate::util::to_wide;
 use juicebar_shared::demo::{is_demo_mode, sample_devices};
 use juicebar_shared::device::{Battery, Device, NameSource};
@@ -310,6 +311,7 @@ impl App {
             asleep: Vec::new(),
             slept: HashMap::new(),
         };
+        set_theme_choice(app.settings.borrow().window_theme);
         create_status_icon(window);
         crate::menu_ui::set_menu_owner(window);
         use_hover_card(app.settings.borrow().hover_action == HoverAction::Card);
@@ -466,6 +468,9 @@ impl App {
     /// Applies choices the settings window just changed.
     pub fn on_settings_changed(&mut self) {
         use_hover_card(self.settings.borrow().hover_action == HoverAction::Card);
+        // Every open window redraws in the chosen light or dark at once, as NetSpeedGauge's do.
+        set_theme_choice(self.settings.borrow().window_theme);
+        notify_theme_change();
         self.restart_poll_timer();
         // Renames and confirmed names are applied by the next read; demo and real alike.
         self.refresh();

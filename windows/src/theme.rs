@@ -6,6 +6,7 @@ use crate::util::to_wide;
 use juicebar_shared::tone::Tone;
 use windows_sys::Win32::Graphics::Gdi::HFONT;
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU8, Ordering};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::Graphics::Dwm::{
     DwmExtendFrameIntoClientArea, DwmSetWindowAttribute, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW,
@@ -71,6 +72,8 @@ pub struct Theme {
     /// The accent as NetSpeedGauge shows it: switches that are on and the sidebar marker.
     pub highlight: u32,
 }
+
+static THEME_CHOICE: AtomicU8 = AtomicU8::new(0);
 
 thread_local! {
     static LISTENERS: RefCell<Vec<Box<dyn Fn()>>> = RefCell::new(Vec::new());
@@ -199,9 +202,26 @@ pub fn build_theme(is_dark: bool, is_taskbar_dark: bool, is_high_contrast: bool,
     }
 }
 
-/// Returns the user's current look, read fresh from Windows.
+/// Sets the user's choice for Juice Bar's windows, as NetSpeedGauge's: 0 follows Windows, 1 is light, 2 is dark.
+pub fn set_theme_choice(choice: u8) {
+    THEME_CHOICE.store(choice, Ordering::Relaxed);
+}
+
+/// Returns true when Juice Bar's windows are dark: the user's choice, or Windows' app mode when it follows Windows.
+fn is_window_dark() -> bool {
+    match THEME_CHOICE.load(Ordering::Relaxed) {
+        1 => false,
+        2 => true,
+        _ => read_dword(HKEY_CURRENT_USER, PERSONALIZE, "AppsUseLightTheme") != Some(1),
+    }
+}
+
+/**
+ * Returns the user's current look, read fresh from Windows. The window theme choice sets light or
+ * dark for Juice Bar's own windows; the tray glyph keeps following the taskbar.
+ */
 pub fn current_theme() -> Theme {
-    let is_dark = read_dword(HKEY_CURRENT_USER, PERSONALIZE, "AppsUseLightTheme") != Some(1);
+    let is_dark = is_window_dark();
     let is_taskbar_dark = read_dword(HKEY_CURRENT_USER, PERSONALIZE, "SystemUsesLightTheme") != Some(1);
     let transparency_on = read_dword(HKEY_CURRENT_USER, PERSONALIZE, "EnableTransparency") != Some(0);
     let contrast = is_high_contrast();
