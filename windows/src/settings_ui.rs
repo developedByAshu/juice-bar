@@ -54,6 +54,8 @@ const CARD_RADIUS: i32 = 6;
 const NAV_TOP: i32 = 62;
 const NAV_ROW: i32 = 40;
 const SCROLL_STEP: i32 = 72;
+// One notch of a mouse wheel, in Windows' wheel units.
+const WHEEL_NOTCH: i32 = 120;
 const CONTROL_HEIGHT: i32 = 30;
 const STEPPER_VALUE_WIDTH: i32 = 76;
 const TOGGLE_WIDTH: i32 = 40;
@@ -243,6 +245,8 @@ struct Window {
     reset_done: Option<Setting>,
     /// The device whose rename was just saved; its row shows a green "Saved" line for a moment.
     saved_id: Option<String>,
+    /// Wheel movement too small to scroll a pixel yet, kept for the next event.
+    wheel_rest: i32,
 }
 
 thread_local! {
@@ -774,6 +778,15 @@ fn save_and_announce(state: &Window) {
     unsafe { PostMessageW(state.owner, WM_APP_SETTINGS_CHANGED, 0, 0) };
 }
 
+/**
+ * Turns a wheel event into pixels to scroll, with what is left over for the next one. A mouse notch is
+ * 120 and moves step; a touchpad sends many smaller amounts, which add up to the same distance.
+ */
+pub fn wheel_pixels(rest: i32, delta: i32, step: i32) -> (i32, i32) {
+    let total = rest + delta * step;
+    (total / WHEEL_NOTCH, total % WHEEL_NOTCH)
+}
+
 /// Shows the green "Done" line under a reset row for a few seconds.
 fn show_reset_done(state: &mut Window, row: Setting) {
     state.reset_done = Some(row);
@@ -1266,9 +1279,17 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
             0
         }
         WM_MOUSEWHEEL => {
+            // By how far the wheel or touchpad moved: a notch still scrolls one step, a touchpad's small moves add up.
             let delta = ((wparam >> 16) & 0xFFFF) as i16 as i32;
-            let dpi = with_window(|state| state.dpi).unwrap_or(96);
-            scroll_by(-delta.signum() * scale(SCROLL_STEP, dpi));
+            let pixels = with_window(|state| {
+                let (pixels, rest) = wheel_pixels(state.wheel_rest, delta, scale(SCROLL_STEP, state.dpi));
+                state.wheel_rest = rest;
+                pixels
+            })
+            .unwrap_or(0);
+            if pixels != 0 {
+                scroll_by(-pixels);
+            }
             0
         }
         WM_KEYDOWN => {
@@ -1463,6 +1484,7 @@ pub fn open_settings_on(owner: HWND, settings: Rc<RefCell<Settings>>, devices: R
                 edit_brush: CreateSolidBrush(swap_rgb(field_fill(&theme))),
                 reset_done: None,
                 saved_id: None,
+                wheel_rest: 0,
             });
         });
         ShowWindow(window, SW_SHOW);

@@ -7,6 +7,7 @@ use juicebar_shared::tone::Tone;
 use juicebar_windows::app::tooltip_text;
 use juicebar_windows::glyph::glass_image;
 use juicebar_windows::menu_ui::{build_device_row, menu_height, menu_scale, place_flyout, RowEnd};
+use juicebar_windows::settings_ui::wheel_pixels;
 use juicebar_windows::startup::startup_command;
 use juicebar_windows::status_icon::{glyph_color, unpremultiply};
 use juicebar_windows::theme::{build_theme, AMBER, GREEN, RED};
@@ -289,4 +290,24 @@ fn pushed_keyboard_percent_keeps_charging_from_the_last_reading() {
     assert_eq!(pushed_battery(Some(Battery { percent: 71, is_charging: false }), charging), Some(Battery { percent: 71, is_charging: true }));
     assert_eq!(pushed_battery(Some(Battery { percent: 71, is_charging: false }), None), Some(Battery { percent: 71, is_charging: false }));
     assert_eq!(pushed_battery(None, charging), None);
+}
+
+#[test]
+fn a_mouse_notch_scrolls_one_step_as_before() {
+    assert_eq!(wheel_pixels(0, 120, 72), (72, 0));
+    assert_eq!(wheel_pixels(0, -240, 72), (-144, 0));
+}
+
+#[test]
+fn small_touchpad_moves_add_up_to_one_step_not_one_step_each() {
+    let (mut moved, mut rest) = (0, 0);
+    for _ in 0..15 {
+        let (pixels, left) = wheel_pixels(rest, 8, 72);
+        moved += pixels;
+        rest = left;
+    }
+    assert_eq!((moved, rest), (72, 0), "fifteen moves of 8 make one notch of 120");
+    let (pixels, rest) = wheel_pixels(0, 3, 72);
+    assert_eq!((pixels, rest), (1, 96), "a tiny move scrolls a pixel and keeps the rest");
+    assert_eq!(wheel_pixels(rest, -3, 72), (-1, 0), "moving back the same amount cancels out");
 }
