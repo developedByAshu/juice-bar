@@ -864,13 +864,20 @@ fn activate(control: Control) {
                 updater::check_now(owner);
             }
         }
-        Control::ResetPage => {
-            with_window(|state| {
-                state.settings.borrow_mut().reset_appearance();
-                save_and_announce(state);
-                show_reset_done(state, Setting::ResetPage);
-            });
-        }
+        // Asks first on the same card as Reset all, as NetSpeedGauge's Reset this page does.
+        Control::ResetPage => show_confirm(
+            "Reset Appearance?",
+            "The window theme, the % in the icon and the menu text size
+go back to how Juice Bar started.",
+            || {
+                with_window(|state| {
+                    state.settings.borrow_mut().reset_appearance();
+                    save_and_announce(state);
+                    show_reset_done(state, Setting::ResetPage);
+                });
+                invalidate();
+            },
+        ),
         Control::Reset => show_confirm(
             "Reset every setting?",
             "Every choice and rename goes back to how Juice Bar started.

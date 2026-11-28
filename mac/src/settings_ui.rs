@@ -108,6 +108,7 @@ const DEVELOPER_NAME: &str = "Ashutosh Anand";
 const DEVELOPER_ORIGIN: &str = "From India";
 const APP_TAGLINE: &str = "Mouse and keyboard battery in the menu bar.";
 const RESET_DETAIL: [&str; 2] = ["Names, hidden devices, the check interval and the %", "next to the icon go back to their defaults."];
+const RESET_PAGE_DETAIL: [&str; 2] = ["The window theme, the % next to the icon and the", "menu text size go back to how Juice Bar started."];
 const RESET_ALL_DONE_TEXT: &str = "Done. Every setting is back to its default.";
 const RESET_PAGE_DONE_TEXT: &str = "Done. Appearance is back to its default.";
 
@@ -249,6 +250,8 @@ struct SettingsWindow {
     hits: Vec<HitArea>,
     hover: Option<Action>,
     is_confirming_reset: bool,
+    /// The confirm card asks about Appearance's own Reset, not Reset all.
+    is_confirming_page: bool,
     /// The reset row whose hint shows the green "done" line for a few seconds: its button's action.
     reset_done: Option<Action>,
     done_timer: Option<Retained<NSTimer>>,
@@ -767,9 +770,10 @@ impl SettingsWindow {
         canvas::round_rect(tile_x, tile_y, LOCK_TILE, LOCK_TILE, (CARD_RADIUS + 2) as f32, mix(theme.card, theme.danger, 0.16));
         canvas::symbol(tile_x + LOCK_TILE / 2, tile_y + LOCK_TILE / 2, ICON_RESET, 13.0, theme.danger);
         let text_x = tile_x + LOCK_TILE + 12;
-        canvas::text(text_x, tile_y + 1, "Reset all settings?", &self.fonts.strong, theme.text, Align::Left);
+        let (title, detail) = if self.is_confirming_page { ("Reset Appearance?", RESET_PAGE_DETAIL) } else { ("Reset all settings?", RESET_DETAIL) };
+        canvas::text(text_x, tile_y + 1, title, &self.fonts.strong, theme.text, Align::Left);
         canvas::text(text_x, tile_y + 21, "This cannot be undone", &self.fonts.small, theme.muted, Align::Left);
-        for (position, line) in RESET_DETAIL.iter().enumerate() {
+        for (position, line) in detail.iter().enumerate() {
             canvas::text(x + 20, y + 76 + position as i32 * 20, line, &self.fonts.body, theme.text, Align::Left);
         }
         let button_y = y + CONFIRM_HEIGHT - 20 - BUTTON_HEIGHT;
@@ -844,11 +848,12 @@ impl SettingsWindow {
                 effects.apply = Some(self.settings.clone());
             }
             Action::CheckNow => updater::check_now(),
+            // Asks first on the same card as Reset all, as NetSpeedGauge's Reset this page does.
             Action::ResetPage => {
-                self.settings.reset_appearance();
-                self.reset_done = Some(Action::ResetPage);
-                effects.apply = Some(self.settings.clone());
-                effects.starts_done_timer = true;
+                self.is_confirming_reset = true;
+                self.is_confirming_page = true;
+                self.reset_done = None;
+                effects.layout = true;
             }
             Action::ToggleShown(index) => {
                 let Some(id) = self.devices.get(index).map(|device| device.id.clone()) else {
@@ -863,12 +868,19 @@ impl SettingsWindow {
             }
             Action::AskReset => {
                 self.is_confirming_reset = true;
+                self.is_confirming_page = false;
                 self.reset_done = None;
                 effects.layout = true;
             }
             Action::CancelReset => {
                 self.is_confirming_reset = false;
                 effects.layout = true;
+            }
+            Action::ConfirmReset if self.is_confirming_page => {
+                self.settings.reset_appearance();
+                self.is_confirming_reset = false;
+                self.reset_done = Some(Action::ResetPage);
+                effects = Effects { apply: Some(self.settings.clone()), layout: true, starts_done_timer: true, ..Effects::default() };
             }
             Action::ConfirmReset => {
                 // When updates were last checked is a record, not a choice, so reset_all keeps it.
@@ -1228,6 +1240,7 @@ fn build(settings: Settings, devices: Vec<Device>) -> Retained<NSWindow> {
         hits: Vec::new(),
         hover: None,
         is_confirming_reset: false,
+        is_confirming_page: false,
         reset_done: None,
         done_timer: None,
         editing: None,
