@@ -100,6 +100,24 @@ Juice Bar asks the devices directly and puts the answer where you already look.
 
 Juice Bar checks GitHub daily by default (on launch, daily, weekly, monthly or **Never**, in Settings). It installs a new version only when the release carries the project's signature, and only after you click **Install**. No need to replace the app by hand.
 
+## Check your download
+
+Every release lists each file's SHA-256 in `SHA256SUMS.txt`, and that list is signed with the project's offline key. The app checks this itself before installing any update. For the first download you can check it by hand. You need OpenSSL 3: `brew install openssl` on Mac, and Git for Windows already includes it.
+
+In Terminal (Mac) or Git Bash (Windows), in the folder with your download, set `TAG` to the release you downloaded:
+
+```sh
+TAG=v0.2.2
+curl -sSLO https://github.com/developedByAshu/juice-bar/releases/download/$TAG/SHA256SUMS.txt
+curl -sSL https://raw.githubusercontent.com/developedByAshu/juice-bar/main/signatures/$TAG.sig | xxd -r -p > SHA256SUMS.sig
+printf -- '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAu9CJdb1tJuzDO+ANYtPdD2j5jYhW5+hEeJb6i8ltAqQ=\n-----END PUBLIC KEY-----\n' > release-key.pem
+OPENSSL=$(brew --prefix openssl 2>/dev/null)/bin/openssl; [ -x "$OPENSSL" ] || OPENSSL=openssl
+$OPENSSL pkeyutl -verify -pubin -inkey release-key.pem -rawin -in SHA256SUMS.txt -sigfile SHA256SUMS.sig
+tr -d '\r' < SHA256SUMS.txt | shasum -a 256 -c --ignore-missing
+```
+
+Both must pass: `Signature Verified Successfully`, then `OK` beside your file. If either fails, do not open the file and please [open an issue](https://github.com/developedByAshu/juice-bar/issues).
+
 ## Works on
 
 Tested on macOS 27 with Apple silicon and on Windows 11. There is no version for Intel Macs. If something breaks, [open an issue](https://github.com/developedByAshu/juice-bar/issues).
