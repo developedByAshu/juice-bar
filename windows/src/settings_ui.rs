@@ -37,8 +37,8 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
 
 // Every size below is NetSpeedGauge's (windows/src/settings_ui.rs), at 100% scaling, so the two windows match.
 const CLASS_NAME: &str = "JuiceBarSettings";
-const WIDTH: i32 = 680;
-const HEIGHT: i32 = 640;
+const WIDTH: i32 = 720;
+const HEIGHT: i32 = 720;
 const SIDEBAR_WIDTH: i32 = 176;
 const MARGIN: i32 = 20;
 const HEADER_HEIGHT: i32 = 62;
