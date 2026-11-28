@@ -59,27 +59,26 @@ pub fn remembered_bluetooth_names(entries: &[BluetoothEntry], kind: DeviceKind) 
     entries.iter().filter(|entry| entry.kind == kind).map(|entry| entry.name.clone()).collect()
 }
 
-/// Returns menu rows for Bluetooth devices connected right now that report a battery.
+/// Returns menu rows for Bluetooth devices connected right now, with their % once the device reports it.
 pub fn bluetooth_devices(entries: &[BluetoothEntry]) -> Vec<Device> {
     entries
         .iter()
         .filter(|entry| entry.is_connected)
-        .filter_map(|entry| {
-            let percent = entry.battery?;
+        .map(|entry| {
             // An exact catalog name wins, as for dongles; a brand-shared chip keeps its Bluetooth name.
             let exact = juicebar_shared::catalog::find_by_ids(entry.vendor_id, entry.product_id).filter(|known| !known.brand_shared);
             let (name, name_source) = exact.map_or((entry.name.clone(), NameSource::DeviceReported), |known| (known.family_name.to_string(), NameSource::Catalog));
-            Some(Device {
+            Device {
                 id: format!("bluetooth:{}", juicebar_shared::settings::clean_key(&entry.name)),
                 kind: entry.kind,
                 connection: Connection::Bluetooth,
                 name,
                 name_source,
-                battery: Some(Battery { percent, is_charging: false }),
+                battery: entry.battery.map(|percent| Battery { percent, is_charging: false }),
                 protocol: Some("bluetooth"),
                 vendor_id: entry.vendor_id,
                 product_id: entry.product_id,
-            })
+            }
         })
         .collect()
 }

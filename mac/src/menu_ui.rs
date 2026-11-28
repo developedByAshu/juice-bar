@@ -251,6 +251,8 @@ pub fn percent_label(device: &Device) -> String {
     match (device.connection, device.battery) {
         (_, Some(battery)) => format!("{}%", battery.percent),
         (Connection::Usb, None) => "Charging".to_string(),
+        // Connected over Bluetooth, % not reported yet (or never): no number, never "Not connected".
+        (Connection::Bluetooth, None) => String::new(),
         (_, None) if device.is_unrecognised() => String::new(),
         (_, None) => NOT_CONNECTED_TEXT.to_string(),
     }
