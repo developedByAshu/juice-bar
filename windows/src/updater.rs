@@ -1,11 +1,15 @@
 //! Check for updates on Windows. A background thread asks GitHub for the latest release over
-//! WinHTTP, downloads the program and SHA256SUMS.txt, checks the sha256 and leaves the new copy
-//! next to the running one. The UI thread then swaps the two and starts the new copy, which waits
-//! for this one to exit. Nothing about the user is sent: only the app's name, as the User-Agent.
+//! WinHTTP, downloads SHA256SUMS.txt and its signature, checks the signature with the release key,
+//! then downloads the program, checks its sha256 and leaves the new copy next to the running one.
+//! The UI thread asks first; on Install it swaps the two and starts the new copy, which waits for
+//! this one to exit. Nothing about the user is sent: only the app's name, as the User-Agent.
 
 use crate::messages::WM_APP_UPDATE;
 use crate::util::to_wide;
-use juicebar_shared::update::{asset_url, expected_sha, is_newer, is_sha_match, latest_release_url, release_tag, user_agent, windows_asset_name, UpdateStatus};
+use juicebar_shared::update::{
+    asset_url, expected_sha, is_allowed_download_url, is_newer, is_release_signed, is_sha_match, latest_release_url, release_tag, signature_url, user_agent,
+    windows_asset_name, UpdateStatus,
+};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -44,13 +48,15 @@ const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Au
 pub struct Outcome {
     /// When GitHub answered, to save as the last check; None when it could not be reached.
     pub checked_at: Option<u64>,
-    /// The checked new copy waiting next to the running program.
-    pub new_copy: Option<PathBuf>,
+    /// The checked new copy waiting next to the running program, with its version.
+    pub new_copy: Option<(String, PathBuf)>,
 }
 
 static STATUS: Mutex<UpdateStatus> = Mutex::new(UpdateStatus::Idle);
 static OUTCOME: Mutex<Option<Outcome>> = Mutex::new(None);
 static IS_BUSY: AtomicBool = AtomicBool::new(false);
+/// The last checked download and its tag, kept when the user says Later so the next check need not fetch it again.
+static READY: Mutex<Option<(String, PathBuf)>> = Mutex::new(None);
 
 /// Returns where the Check now row stands.
 pub fn status() -> UpdateStatus {
@@ -101,21 +107,47 @@ fn run_check(window: isize) -> (UpdateStatus, Outcome) {
     if !is_newer(VERSION, &tag) {
         return (UpdateStatus::UpToDate, checked);
     }
+    let kept = READY.lock().unwrap_or_else(PoisonError::into_inner).clone().filter(|(ready_tag, path)| *ready_tag == tag && path.exists());
+    if let Some(kept) = kept {
+        return (UpdateStatus::Ready(tag), Outcome { new_copy: Some(kept), ..checked });
+    }
     set_status(window, UpdateStatus::Downloading(tag.clone()));
-    match download_checked(&json, &agent).and_then(|program| write_new_copy(&program)) {
-        Some(new_copy) => (UpdateStatus::Ready(tag), Outcome { new_copy: Some(new_copy), ..checked }),
+    match download_checked(&json, &tag, &agent).and_then(|program| write_new_copy(&program)) {
+        Some(new_copy) => {
+            let ready = (tag.clone(), new_copy);
+            *READY.lock().unwrap_or_else(PoisonError::into_inner) = Some(ready.clone());
+            (UpdateStatus::Ready(tag), Outcome { new_copy: Some(ready), ..checked })
+        }
         None => (UpdateStatus::Failed, checked),
     }
 }
 
-/// Downloads this machine's program and keeps it only when its sha256 matches SHA256SUMS.txt and it is a Windows program.
-fn download_checked(json: &str, agent: &str) -> Option<Vec<u8>> {
+/**
+ * Downloads SHA256SUMS.txt and its signature, and only when the release key signed those exact bytes
+ * downloads this machine's program, kept only when its sha256 matches and it is a Windows program. A
+ * missing or bad signature is no update; the next check tries again.
+ */
+fn download_checked(json: &str, tag: &str, agent: &str) -> Option<Vec<u8>> {
     let asset = windows_asset_name(PROGRAM_NAME, cfg!(target_arch = "aarch64"));
-    let sums = fetch(&asset_url(json, SUMS_NAME)?, agent, FILE_ACCEPT).and_then(|body| String::from_utf8(body).ok())?;
-    let expected = expected_sha(&sums, &asset)?;
-    let program = fetch(&asset_url(json, &asset)?, agent, FILE_ACCEPT)?;
+    let sums = download(&asset_url(json, SUMS_NAME)?, agent)?;
+    let signature = download(&signature_url(REPOSITORY, tag)?, agent).and_then(|body| String::from_utf8(body).ok())?;
+    if !is_release_signed(&sums, &signature) {
+        return None;
+    }
+    let expected = expected_sha(std::str::from_utf8(&sums).ok()?, &asset)?;
+    let program = download(&asset_url(json, &asset)?, agent)?;
     // Every Windows program starts with "MZ"; anything else is not one, whatever its name.
     (is_sha_match(&program, &expected) && program.starts_with(b"MZ")).then_some(program)
+}
+
+/// Downloads an update file, but only from the owner's GitHub or GitHub's file stores.
+fn download(url: &str, agent: &str) -> Option<Vec<u8>> {
+    is_allowed_download_url(url).then(|| fetch(url, agent, FILE_ACCEPT)).flatten()
+}
+
+/// Forgets a kept download once it went in.
+pub fn forget_ready() {
+    *READY.lock().unwrap_or_else(PoisonError::into_inner) = None;
 }
 
 /// Returns "JuiceBar.exe.<ending>" next to the running program.
@@ -180,7 +212,8 @@ pub fn time_label(seconds: u64) -> Option<String> {
     if seconds == 0 {
         return None;
     }
-    let ticks = (seconds + WINDOWS_EPOCH_OFFSET) * TICKS_PER_SECOND;
+    // A broken saved time must not overflow; it only shows no time.
+    let ticks = seconds.checked_add(WINDOWS_EPOCH_OFFSET)?.checked_mul(TICKS_PER_SECOND)?;
     let file_time = FILETIME { dwLowDateTime: ticks as u32, dwHighDateTime: (ticks >> 32) as u32 };
     // SAFETY: plain conversions into zeroed structs owned here.
     unsafe {
@@ -242,7 +275,7 @@ fn fetch(url: &str, agent: &str, accept: &str) -> Option<Vec<u8>> {
                 return Some(body);
             }
             let start = body.len();
-            if start + available as usize > MAX_DOWNLOAD_BYTES {
+            if start.checked_add(available as usize).is_none_or(|end| end > MAX_DOWNLOAD_BYTES) {
                 return None;
             }
             body.resize(start + available as usize, 0);

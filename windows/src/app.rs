@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, PostMessageW, SetCoalescableTimer, SetTimer, MB_ICONINFORMATION, MB_OK, SW_SHOWNORMAL};
+use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, PostMessageW, SetCoalescableTimer, SetTimer, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, SW_SHOWNORMAL};
 
 /// Timer ids on the main window.
 pub const POLL_TIMER: usize = 1;
@@ -117,8 +117,8 @@ pub struct App {
     slept: HashMap<String, Battery>,
     /// False until the first update timer fires, which is the "On launch" check.
     has_launch_check_run: bool,
-    /// A downloaded, checked update waiting for the settings window to close.
-    waiting_update: Option<PathBuf>,
+    /// A downloaded, checked update and its version, waiting for the settings window to close.
+    waiting_update: Option<(String, PathBuf)>,
 }
 
 thread_local! {
@@ -515,8 +515,9 @@ impl App {
     }
 
     /**
-     * Takes a step of the update check: saves when GitHub answered, and swaps in a checked update
-     * once the settings window is closed. Returns false when the app should quit for the new copy.
+     * Takes a step of the update check: saves when GitHub answered, and once the settings window is
+     * closed asks before a checked update goes in. Later keeps the download and the next check asks
+     * again. Returns false when the app should quit for the new copy.
      */
     pub fn on_update(&mut self) -> bool {
         if let Some(outcome) = updater::take_outcome() {
@@ -532,10 +533,24 @@ impl App {
         if is_settings_open() {
             return true;
         }
-        match self.waiting_update.take() {
-            Some(new_copy) => !updater::install(&new_copy),
-            None => true,
+        let Some((version, new_copy)) = self.waiting_update.take() else { return true };
+        if !self.asks_to_install(&version) {
+            return true;
         }
+        let is_installed = updater::install(&new_copy);
+        if is_installed {
+            updater::forget_ready();
+        }
+        !is_installed
+    }
+
+    /// Asks "Juice Bar 0.2.0 is ready. Install now?" Yes installs, No waits for the next check.
+    fn asks_to_install(&self, version: &str) -> bool {
+        let title = to_wide("Juice Bar");
+        let question = juicebar_shared::update::install_question("Juice Bar", version);
+        let text = to_wide(&format!("{question}\n\nYes installs it now: Juice Bar closes and opens again. No asks again at the next check."));
+        // SAFETY: both strings outlive the call.
+        unsafe { MessageBoxW(self.window, text.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONQUESTION) == IDYES }
     }
 
     fn tell_probe_failed(&self) {
