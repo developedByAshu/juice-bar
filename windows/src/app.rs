@@ -137,8 +137,10 @@ pub fn with_app<T>(action: impl FnOnce(&mut App) -> T) -> Option<T> {
 }
 
 /// Returns demo devices for `JUICEBAR_DEMO=1`. `JUICEBAR_DEMO_PERCENTS=18,60` picks the keyboard and mouse %.
+/// Demo mode, and so this switch, exists only in debug builds.
 fn demo_devices() -> Vec<Device> {
-    let percents: Vec<u8> = std::env::var("JUICEBAR_DEMO_PERCENTS").unwrap_or_default().split(',').filter_map(|part| part.trim().parse().ok()).collect();
+    let percents_text = if cfg!(debug_assertions) { std::env::var("JUICEBAR_DEMO_PERCENTS").unwrap_or_default() } else { String::new() };
+    let percents: Vec<u8> = percents_text.split(',').filter_map(|part| part.trim().parse().ok()).collect();
     sample_devices(percents.first().copied().unwrap_or(82), percents.get(1).copied().unwrap_or(15))
 }
 

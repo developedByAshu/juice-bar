@@ -197,12 +197,24 @@ pub fn on_menu_closed() {
     with_app(|app| app.open_popup = None);
 }
 
-/// Capture mode for screenshots without touching the mouse: JUICEBAR_CAPTURE=menu (the devices popup),
+/// Reads a capture switch from the environment. Only debug builds have capture mode.
+#[cfg(debug_assertions)]
+fn capture_switch(name: &str) -> Result<String, std::env::VarError> {
+    std::env::var(name)
+}
+
+/// A release build reads no capture switch, so nothing outside can drive its UI or make it write files.
+#[cfg(not(debug_assertions))]
+fn capture_switch(_name: &str) -> Result<String, std::env::VarError> {
+    Err(std::env::VarError::NotPresent)
+}
+
+/// Capture mode for screenshots without touching the mouse, in debug builds only: JUICEBAR_CAPTURE=menu (the devices popup),
 /// actions (Settings and Quit), hover (the battery card) or settings opens that view after the first scan and quits a few seconds later. JUICEBAR_CAPTURE_PAGE picks the
 /// settings page (general, appearance, devices, advanced, about). JUICEBAR_CAPTURE=reset walks a real reset with a
 /// rename being typed, writes JUICEBAR_CAPTURE_PATH after it, then closes the window mid edit.
 fn start_capture_if_asked() {
-    match std::env::var("JUICEBAR_CAPTURE").as_deref() {
+    match capture_switch("JUICEBAR_CAPTURE").as_deref() {
         Ok(CAPTURE_DEVICES | CAPTURE_ACTIONS) => {
             start_timer(3.0, sel!(captureOpenMenu:), false);
             start_timer(9.0, sel!(captureFinish:), false);
@@ -218,7 +230,7 @@ fn start_capture_if_asked() {
         }
         Ok("settings") => {
             crate::settings_ui::open_settings();
-            let page = std::env::var("JUICEBAR_CAPTURE_PAGE").unwrap_or_default();
+            let page = capture_switch("JUICEBAR_CAPTURE_PAGE").unwrap_or_default();
             if let Some(index) = CAPTURE_PAGES.iter().position(|name| *name == page) {
                 crate::settings_ui::show_page_for_checks(index);
             }
@@ -240,7 +252,7 @@ const CAPTURE_ACTIONS: &str = "actions";
 const CAPTURE_HOVER: &str = "hover";
 
 fn capture_wants(mode: &str) -> bool {
-    std::env::var("JUICEBAR_CAPTURE").as_deref() == Ok(mode)
+    capture_switch("JUICEBAR_CAPTURE").as_deref() == Ok(mode)
 }
 
 /// The settings pages capture mode can open, in sidebar order.
@@ -259,13 +271,13 @@ pub fn capture_reset() {
     eprintln!("capture: opened Advanced while typing: {}", click_for_checks("page:3"));
     log_renames("after leaving the rename (expected unsaved)");
     eprintln!("capture: asked to reset: {}", click_for_checks("ask_reset"));
-    if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_CONFIRM_PATH") {
+    if let Ok(path) = capture_switch("JUICEBAR_CAPTURE_CONFIRM_PATH") {
         eprintln!("capture: confirm card saved: {}", crate::settings_ui::capture_to(&path));
     }
     eprintln!("capture: confirmed the reset: {}", click_for_checks("confirm_reset"));
     log_renames("after the reset");
     eprintln!("capture: done cue showing: {}", is_reset_done_for_checks());
-    if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_PATH") {
+    if let Ok(path) = capture_switch("JUICEBAR_CAPTURE_PATH") {
         eprintln!("capture: reset page saved: {}", crate::settings_ui::capture_to(&path));
     }
 }
@@ -274,7 +286,7 @@ pub fn capture_reset() {
 /// a click elsewhere, and Escape. Each step is painted in both looks under JUICEBAR_CAPTURE_DIR. Used only by capture mode.
 pub fn capture_rename() {
     use crate::settings_ui::{capture_both_looks_for_checks, click_for_checks, editing_row_for_checks, leave_rename_for_checks, press_in_rename_for_checks, show_page_for_checks, type_rename_for_checks};
-    let folder = std::env::var("JUICEBAR_CAPTURE_DIR").unwrap_or_default();
+    let folder = capture_switch("JUICEBAR_CAPTURE_DIR").unwrap_or_default();
     let shot = |name: &str| eprintln!("capture: {name} saved: {}", capture_both_looks_for_checks(&format!("{folder}/rename_{name}")));
     show_page_for_checks(2);
     shot("1_idle");
@@ -324,9 +336,9 @@ pub fn capture_open_menu() {
 
 /// Closes an open menu and quits. Used only by capture mode.
 pub fn capture_finish() {
-    if std::env::var("JUICEBAR_CAPTURE").as_deref() == Ok("reset") {
+    if capture_switch("JUICEBAR_CAPTURE").as_deref() == Ok("reset") {
         eprintln!("capture: still running after the reset, quitting");
-    } else if let Ok(path) = std::env::var("JUICEBAR_CAPTURE_PATH") {
+    } else if let Ok(path) = capture_switch("JUICEBAR_CAPTURE_PATH") {
         let menu = with_app(|app| app.menu.clone());
         let is_menu = capture_wants(CAPTURE_DEVICES) || capture_wants(CAPTURE_ACTIONS);
         let saved = match menu {

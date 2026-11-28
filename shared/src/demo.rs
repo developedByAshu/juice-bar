@@ -1,5 +1,6 @@
 //! Sample devices for building and screenshotting the UI on a machine without the dongles.
-//! Start either app with `JUICEBAR_DEMO=1` to show these instead of real devices.
+//! Start a debug build of either app with `JUICEBAR_DEMO=1` to show these instead of real devices.
+//! A release build has no demo mode.
 
 use crate::device::{Battery, Connection, Device, DeviceKind, NameSource};
 
@@ -26,7 +27,14 @@ pub fn sample_devices(keyboard_percent: u8, mouse_percent: u8) -> Vec<Device> {
     ]
 }
 
-/// Checks whether the app was started in demo mode.
+/// Checks whether the app was started in demo mode. Only debug builds read the switch.
+#[cfg(debug_assertions)]
 pub fn is_demo_mode() -> bool {
     std::env::var_os("JUICEBAR_DEMO").is_some()
+}
+
+/// A release build is never in demo mode, whatever the environment says.
+#[cfg(not(debug_assertions))]
+pub fn is_demo_mode() -> bool {
+    false
 }

@@ -129,7 +129,30 @@ fn listen_for_devices(window: HWND) {
     }
 }
 
-/// Runs the app until Quit. `--open-menu` and `--open-settings` open a window at start, for screenshots.
+/**
+ * Opens a window at start, for screenshots, in debug builds only: `--open-menu` the flyout once the
+ * first read is in, `--open-settings[=general|appearance|devices|advanced|about|reset]` a page.
+ */
+#[cfg(debug_assertions)]
+fn open_for_screenshots() {
+    if let Some(argument) = std::env::args().find(|argument| argument.starts_with("--open-settings")) {
+        use crate::settings_ui::{open_settings_on, show_reset_confirm, Page};
+        let choice = argument.split_once('=').map_or("general", |(_, value)| value);
+        let page = match choice {
+            "appearance" => Page::Appearance,
+            "devices" => Page::Devices,
+            "advanced" | "reset" => Page::Advanced,
+            "about" => Page::About,
+            _ => Page::General,
+        };
+        with_app(|app| open_settings_on(app.window, app.settings.clone(), app.devices.clone(), page));
+        if choice == "reset" {
+            show_reset_confirm();
+        }
+    }
+}
+
+/// Runs the app until Quit. A debug build takes `--open-menu` and `--open-settings`, for screenshots.
 pub fn run() {
     let instance_name = to_wide(SINGLE_INSTANCE_NAME);
     let class_name = to_wide(WINDOW_CLASS_NAME);
@@ -162,26 +185,12 @@ pub fn run() {
         // A hidden top-level window, not a message-only one: only top-level windows hear theme changes.
         let window = CreateWindowExW(WS_EX_TOOLWINDOW, class_name.as_ptr(), title.as_ptr(), WS_POPUP, 0, 0, 0, 0, std::ptr::null_mut(), std::ptr::null_mut(), module, std::ptr::null());
         listen_for_devices(window);
-        if std::env::args().any(|argument| argument == "--open-menu") {
+        if cfg!(debug_assertions) && std::env::args().any(|argument| argument == "--open-menu") {
             crate::app::OPEN_MENU_AFTER_SCAN.store(true, Ordering::Relaxed);
         }
         App::start(window);
-        // --open-settings[=general|appearance|devices|advanced|about|reset] opens a page at start, for screenshots.
-        if let Some(argument) = std::env::args().find(|argument| argument.starts_with("--open-settings")) {
-            use crate::settings_ui::{open_settings_on, show_reset_confirm, Page};
-            let choice = argument.split_once('=').map_or("general", |(_, value)| value);
-            let page = match choice {
-                "appearance" => Page::Appearance,
-                "devices" => Page::Devices,
-                "advanced" | "reset" => Page::Advanced,
-                "about" => Page::About,
-                _ => Page::General,
-            };
-            with_app(|app| open_settings_on(app.window, app.settings.clone(), app.devices.clone(), page));
-            if choice == "reset" {
-                show_reset_confirm();
-            }
-        }
+        #[cfg(debug_assertions)]
+        open_for_screenshots();
         // Release memory only startup needed. Anything still in use comes straight back.
         SetProcessWorkingSetSize(GetCurrentProcess(), usize::MAX, usize::MAX);
         let mut message: MSG = std::mem::zeroed();
