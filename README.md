@@ -1,12 +1,11 @@
+<h1 align="center">Juice Bar (Mouse and Keyboard Battery)</h1>
+
 <p align="center">
-  <img src="docs/icon.png" width="128" alt="Juice Bar icon">
+  <img src="docs/images/banner.png" alt="Juice Bar shows the battery of your wireless mouse and keyboard in the Mac menu bar and the Windows tray" width="860">
 </p>
 
-<h1 align="center">Juice Bar</h1>
-
 <p align="center">
-  Battery % of your wireless mouse and keyboard, in the Mac menu bar and the Windows tray.<br>
-  Even over 2.4 GHz dongles, where your computer shows nothing.
+  Battery % of your wireless mouse and keyboard, in the Mac menu bar and the Windows tray. Even over 2.4 GHz dongles, where your computer shows nothing.
 </p>
 
 <p align="center">
@@ -20,22 +19,16 @@
   <img src="https://img.shields.io/badge/licence-GPL--3.0-16A34A" alt="GPL-3.0 licence">
 </p>
 
-<p align="center">
-  <img src="docs/images/menu-light.png" width="300" alt="Juice Bar menu in light mode: keyboard at 82%, mouse at 15% and charging">
-  &nbsp;&nbsp;
-  <img src="docs/images/menu-dark.png" width="300" alt="Juice Bar menu in dark mode">
-</p>
-
 <table align="center">
   <tr>
-    <td align="center" width="170"><h3>1 glance</h3>the glass fills to your lowest battery</td>
+    <td align="center" width="170"><h3>1 Glance</h3>The glass fills to your lowest battery</td>
     <td align="center" width="170"><h3>0.0%</h3>CPU at idle</td>
-    <td align="center" width="170"><h3>~14 MB</h3>RAM on Mac</td>
-    <td align="center" width="170"><h3>1</h3>connection, to GitHub for updates</td>
+    <td align="center" width="170"><h3>49 MB</h3>RAM on Mac</td>
+    <td align="center" width="170"><h3>1</h3>Connection, to GitHub for updates</td>
   </tr>
 </table>
 
-## Why
+## Why I built it
 
 Most wireless mice and keyboards on a 2.4 GHz dongle never tell your computer their battery. You find out when they stop working.
 
@@ -45,11 +38,12 @@ Juice Bar asks the devices directly and puts the answer where you already look.
 
 <table>
   <tr>
-    <td width="50%" align="center"><img src="docs/images/hover-card.png" width="300" alt="Battery card shown when hovering the menu bar icon"><br><sub>Hover the icon for every battery at once</sub></td>
-    <td width="50%" align="center"><img src="docs/images/settings-devices.png" alt="Devices page: rename a device or leave it out of the menu"><br><sub>Rename a device, or leave it out</sub></td>
+    <td width="50%" align="center"><img src="docs/images/menu-light.png" alt="Juice Bar menu: keyboard at 82%, mouse at 15% and charging"><br><sub>Click the icon for every battery</sub></td>
+    <td width="50%" align="center"><img src="docs/images/hover-card.png" alt="Battery card shown when hovering the menu bar icon"><br><sub>Hover for a quick look, with how each device is connected</sub></td>
   </tr>
   <tr>
-    <td colspan="2" align="center"><img src="docs/images/settings-general.png" width="560" alt="General settings: open at login, how often to check batteries, update checks"><br><sub>Light and dark, same as your system (sample devices)</sub></td>
+    <td width="50%" align="center"><img src="docs/images/settings-devices.png" alt="Devices page: rename a device or leave it out of the menu"><br><sub>Rename a device, or leave it out (sample devices)</sub></td>
+    <td width="50%" align="center"><img src="docs/images/settings-general.png" alt="General settings: open at login, how often to check batteries, update checks"><br><sub>Light, dark or same as your system</sub></td>
   </tr>
 </table>
 
@@ -104,9 +98,11 @@ Juice Bar asks the devices directly and puts the answer where you already look.
 
 `SHA256SUMS.txt` in each release lets you check the file.
 
-## Updates
-
 Juice Bar checks GitHub daily by default (on launch, daily, weekly, monthly or **Never**, in Settings). It installs a new version only when the release carries the project's signature, and only after you click **Install**. No need to replace the app by hand.
+
+## Works on
+
+Tested on macOS 27 with Apple silicon and on Windows 11. There is no version for Intel Macs. If something breaks, [open an issue](https://github.com/developedByAshu/juice-bar/issues).
 
 ## Privacy
 
@@ -137,8 +133,10 @@ Juice Bar checks GitHub daily by default (on launch, daily, weekly, monthly or *
 <br>Turn off <b>Open at login</b> on Mac or <b>Start with Windows</b> on Windows, quit it, then delete the app and its settings folder: <code>~/Library/Application Support/JuiceBar</code> on Mac, <code>%APPDATA%\JuiceBar</code> on Windows.
 </details>
 
+## Build it yourself
+
 <details>
-<summary><b>Build it yourself</b></summary>
+<summary><b>Build from source</b></summary>
 <br>You need Rust, plus the Xcode command line tools on Mac or the Visual Studio C++ build tools on Windows.
 
 ```sh
@@ -151,12 +149,8 @@ JUICEBAR_DEMO=1 cargo run -p juicebar-mac --bin JuiceBar   # sample devices, deb
 `shared/` holds devices, protocols, names, colours and settings. `mac/` and `windows/` only draw, with the same file and function names on both sides (`docs/CONTRACT.md`).
 </details>
 
-## Credits
-
-Ideas from open source battery tools such as BatteryBar, BatteryTray, Wireless Device Battery Monitor and mouse_tray. The code here is our own.
-
 ## Licence
 
-[GPL-3.0](LICENSE)
+[GPL-3.0](LICENSE). Ideas from open source battery tools such as BatteryBar, BatteryTray, Wireless Device Battery Monitor and mouse_tray; the code here is our own.
 
 <!-- README reviewed 29 Nov 2026 -->
