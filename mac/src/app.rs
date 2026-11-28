@@ -628,9 +628,10 @@ pub fn probe(tag: isize) {
 pub fn report_url_for(tag: isize) -> Option<String> {
     with_app(|app| {
         let device = app.shown.get(tag as usize)?;
-        let interfaces: Vec<_> = app.scanned.iter().find(|scanned| scanned.device.id == device.id).map(|scanned| scanned.usb.interfaces.iter().map(|(summary, _)| summary.clone()).collect()).unwrap_or_default();
+        let scanned = app.scanned.iter().find(|scanned| scanned.device.id == device.id);
+        let interfaces: Vec<_> = scanned.map(|scanned| scanned.usb.interfaces.iter().map(|(summary, _)| summary.clone()).collect()).unwrap_or_default();
         let os = format!("macOS {}", objc2_foundation::NSProcessInfo::processInfo().operatingSystemVersionString());
-        Some(report_url(device, &interfaces, &os, juicebar_shared::APP_VERSION))
+        Some(report_url(device, scanned.map(|scanned| scanned.usb.product.as_str()), &interfaces, &os, juicebar_shared::APP_VERSION))
     })
     .flatten()
 }

@@ -49,6 +49,8 @@ const TOOLTIP_LIMIT: usize = 127;
 struct ScanResult {
     devices: Vec<Device>,
     interfaces: BTreeMap<String, Vec<InterfaceSummary>>,
+    /// Each dongle's USB product string, for the Report text.
+    products: BTreeMap<String, String>,
     /// The id of the device a Try to detect ran on, and whether it found a protocol.
     probe: Option<(String, bool)>,
 }
@@ -105,6 +107,8 @@ pub struct App {
     /// Every device seen, hidden ones too, so Settings can show them again.
     pub devices: Rc<RefCell<Vec<Device>>>,
     interfaces: BTreeMap<String, Vec<InterfaceSummary>>,
+    /// Each dongle's USB product string by device id, for the Report text.
+    products: BTreeMap<String, String>,
     /// Protocols found by Try to detect, kept for this run: device id to protocol id.
     probed: Rc<RefCell<BTreeMap<String, &'static str>>>,
     is_scanning: bool,
@@ -153,10 +157,11 @@ fn scan(api: &mut Option<hidapi::HidApi>, request: &ScanRequest) -> ScanResult {
     let (settings, probe_id) = (&own_names, request.probe_id.as_deref());
     if is_demo_mode() {
         let devices = demo_devices();
-        return ScanResult { devices, interfaces: BTreeMap::new(), probe: probe_id.map(|id| (id.to_string(), false)) };
+        return ScanResult { devices, interfaces: BTreeMap::new(), products: BTreeMap::new(), probe: probe_id.map(|id| (id.to_string(), false)) };
     }
     let mut devices = Vec::new();
     let mut interfaces = BTreeMap::new();
+    let mut products = BTreeMap::new();
     let mut probe = None;
     if api.is_none() {
         *api = hidapi::HidApi::new().ok();
@@ -183,6 +188,7 @@ fn scan(api: &mut Option<hidapi::HidApi>, request: &ScanRequest) -> ScanResult {
                     probe = Some((id.clone(), protocol.is_some()));
                 }
             }
+            products.insert(id.clone(), usb.product.clone());
             interfaces.insert(id, usb.interfaces.iter().map(|(summary, _)| summary.clone()).collect());
             devices.push(device);
         }
@@ -190,7 +196,7 @@ fn scan(api: &mut Option<hidapi::HidApi>, request: &ScanRequest) -> ScanResult {
     devices.extend(bluetooth_devices());
     // A mouse switched to Bluetooth with its dongle still plugged in: only the live row stays.
     let devices = juicebar_shared::device::drop_idle_twins(devices);
-    ScanResult { devices, interfaces, probe }
+    ScanResult { devices, interfaces, products, probe }
 }
 
 /// Returns the read thread's inbox, starting the thread on first use. It lives as long as the app.
@@ -318,6 +324,7 @@ impl App {
             settings: Rc::new(RefCell::new(Settings::load())),
             devices: Rc::new(RefCell::new(Vec::new())),
             interfaces: BTreeMap::new(),
+            products: BTreeMap::new(),
             probed: Rc::new(RefCell::new(BTreeMap::new())),
             is_scanning: false,
             is_scan_wanted: false,
@@ -364,6 +371,7 @@ impl App {
         keep_recent_readings(&mut devices, &self.devices.borrow(), &mut self.last_read, &self.asleep, Instant::now());
         *self.devices.borrow_mut() = devices;
         self.interfaces = result.interfaces;
+        self.products = result.products;
         if let Some((id, found)) = &result.probe {
             if *found {
                 if let Some(protocol) = self.devices.borrow().iter().find(|device| &device.id == id).and_then(|device| device.protocol) {
@@ -565,7 +573,7 @@ impl App {
         let devices = self.devices.borrow();
         let Some(device) = devices.iter().find(|device| device.id == id) else { return };
         let interfaces = self.interfaces.get(id).cloned().unwrap_or_default();
-        open_url(&report_url(device, &interfaces, &os_label(), juicebar_shared::APP_VERSION));
+        open_url(&report_url(device, self.products.get(id).map(String::as_str), &interfaces, &os_label(), juicebar_shared::APP_VERSION));
     }
 
     /// Runs what the flyout asked for.
