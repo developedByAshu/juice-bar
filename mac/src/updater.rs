@@ -164,9 +164,10 @@ fn download(url: &str, agent: &str) -> Option<Vec<u8>> {
 }
 
 /// Returns ~/Library/Caches/JuiceBar/update, the folder that holds the download until it goes in,
-/// made only the user can open. None without a home folder.
+/// made only the user can open. None without a full home folder path.
 fn work_folder() -> Option<PathBuf> {
-    let caches = PathBuf::from(std::env::var_os("HOME").filter(|home| !home.is_empty())?).join(CACHES_FOLDER);
+    let home = PathBuf::from(std::env::var_os("HOME")?);
+    let caches = home.is_absolute().then(|| home.join(CACHES_FOLDER))?;
     for folder in [&caches, &caches.join(WORK_FOLDER_NAME)] {
         match std::fs::DirBuilder::new().mode(PRIVATE_FOLDER_MODE).create(folder) {
             Ok(()) => {}
