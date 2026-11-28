@@ -9,7 +9,7 @@ use crate::bluetooth::{bluetooth_devices, remembered_names_by_kind};
 use crate::menu_ui::{close_hover_card, close_menu, is_menu_open, refresh_menu, set_menu_text_points, show_card, show_menu, take_menu_action, MenuAction};
 use crate::messages::{WM_APP_KEYBOARD_EVENT, WM_APP_SCAN_DONE};
 use crate::settings_ui::{close_settings, is_settings_open, open_settings, refresh_settings};
-use crate::status_icon::{create_status_icon, set_tooltip, update_status_icon, use_hover_card};
+use crate::status_icon::{create_status_icon, set_tooltip, update_status_icon};
 use crate::theme::{notify_theme_change, set_theme_choice};
 use crate::updater;
 use crate::util::to_wide;
@@ -330,7 +330,6 @@ impl App {
         set_theme_choice(app.settings.borrow().window_theme);
         create_status_icon(window);
         crate::menu_ui::set_menu_owner(window);
-        use_hover_card(app.settings.borrow().hover_action == HoverAction::Card);
         APP.with(|cell| *cell.borrow_mut() = Some(app));
         with_app(|app| {
             app.restart_poll_timer();
@@ -487,7 +486,6 @@ impl App {
 
     /// Applies choices the settings window just changed.
     pub fn on_settings_changed(&mut self) {
-        use_hover_card(self.settings.borrow().hover_action == HoverAction::Card);
         // Every open window redraws in the chosen light or dark at once, as NetSpeedGauge's do.
         set_theme_choice(self.settings.borrow().window_theme);
         notify_theme_change();

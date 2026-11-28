@@ -86,8 +86,8 @@ pub fn update_status_icon(item: &NSStatusItem, tone: Tone, lowest_percent: Optio
         _ => String::new(),
     };
     button.setTitle(&NSString::from_str(&title));
-    let label = lowest_percent.map_or_else(|| "Juice Bar".to_string(), |percent| format!("Juice Bar, lowest battery {percent}%"));
-    button.setToolTip(Some(&NSString::from_str(&label)));
+    // Resting on the icon shows nothing, as on Windows: the battery card is the only hover view.
+    button.setToolTip(None);
 }
 
 /// Returns a path through points scaled from the glyph box into `size`.
