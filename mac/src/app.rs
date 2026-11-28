@@ -56,6 +56,8 @@ struct App {
     has_launch_check_run: bool,
     /// A downloaded, checked update and its version, waiting for the settings window to close.
     waiting_update: Option<(String, PathBuf)>,
+    /// What the menu bar icon shows now (tone, lowest %, % shown), so an unchanged one is not drawn again.
+    icon_shown: Option<(juicebar_shared::tone::Tone, Option<u8>, bool)>,
 }
 
 thread_local! {
@@ -86,7 +88,7 @@ pub fn finish_startup() {
     set_theme_choice(settings.window_theme);
     let poll_timer = Some(start_timer(f64::from(settings.poll_minutes) * 60.0, sel!(poll:), true));
     APP.with(|cell| {
-        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false, open_popup: None, hover_timer: None, last_read: std::collections::HashMap::new(), asleep: Vec::new(), slept: std::collections::HashMap::new(), has_launch_check_run: false, waiting_update: None });
+        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false, open_popup: None, hover_timer: None, last_read: std::collections::HashMap::new(), asleep: Vec::new(), slept: std::collections::HashMap::new(), has_launch_check_run: false, waiting_update: None, icon_shown: None });
     });
     start_timer(LAUNCH_CHECK_DELAY_SECONDS, sel!(updateTimer:), false);
     with_app(sync_item_menu);
@@ -372,8 +374,16 @@ fn rebuild(app: &mut App) {
     app.devices = rows;
     // Settings lists every device; the icon and menu leave out the hidden ones.
     let shown: Vec<Device> = app.devices.iter().filter(|device| !app.settings.hidden.contains(&device.id)).cloned().collect();
-    status_icon::update_status_icon(&app.status_item, icon_tone(&shown), lowest_percent(&shown), app.settings.shows_percent_in_icon);
-    menu_ui::show_menu(&app.menu, &shown, app.settings.menu_font_points, app.open_popup.unwrap_or(PopupKind::Devices));
+    // Nothing is redrawn when nothing changed, as on Windows; a look change clears `icon_shown` to force it.
+    let icon = (icon_tone(&shown), lowest_percent(&shown), app.settings.shows_percent_in_icon);
+    if app.icon_shown != Some(icon) {
+        status_icon::update_status_icon(&app.status_item, icon.0, icon.1, icon.2);
+        app.icon_shown = Some(icon);
+    }
+    // A closed menu is filled again as it opens (menuNeedsUpdate:), so only an open or empty one is rebuilt now.
+    if app.open_popup.is_some() || app.menu.numberOfItems() == 0 {
+        menu_ui::show_menu(&app.menu, &shown, app.settings.menu_font_points, app.open_popup.unwrap_or(PopupKind::Devices));
+    }
     if menu_ui::is_hover_card_open() {
         menu_ui::show_hover_card(&shown, app.settings.menu_font_points, frames_of(&app.status_item));
     }
@@ -624,7 +634,10 @@ pub fn on_menu_opening(_menu: &NSMenu) {
 
 /// Redraws the icon after a light or dark mode change.
 pub fn redraw_icon() {
-    with_app(rebuild);
+    with_app(|app| {
+        app.icon_shown = None;
+        rebuild(app);
+    });
 }
 
 /// Runs the opt-in probe on one unknown dongle, once the user has agreed to it the first time.
