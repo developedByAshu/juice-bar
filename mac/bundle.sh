@@ -22,7 +22,23 @@ if [ -f shared/assets/juicebar.png ]; then
     done
     iconutil -c icns "$icons" -o "$app/Contents/Resources/JuiceBar.icns"
 fi
-# Ad hoc signing pins macOS permissions (Input Monitoring) to this exact build, so every rebuild lost
-# them and the dongles read as offline. A requirement on the bundle id keeps them across rebuilds.
-codesign --force --sign - -r='designated => identifier "com.developedbyashu.juicebar"' "$app"
-echo "Built $root/$app"
+# Signs with the owner's certificate (MAC_SIGN_IDENTITY, default "developedByAshu Code Signing") when
+# this Mac has it, with the hardened runtime. The requirement names the bundle id and that exact
+# certificate, so macOS permissions (Input Monitoring) survive rebuilds and the updater installs only
+# a copy signed the same way. It is self-signed, so it is listed without -v. Without it the app is
+# signed ad hoc, still with the hardened runtime, and on the bundle id alone.
+bundle_id="com.developedbyashu.juicebar"
+identity="${MAC_SIGN_IDENTITY:-developedByAshu Code Signing}"
+cert_sha="$(security find-identity -p codesigning | grep -F "\"$identity\"" | head -1 | awk '{print $2}' | tr 'A-F' 'a-f')"
+if [ -n "$cert_sha" ]; then
+    sign_with="$identity"
+    requirement="designated => identifier \"$bundle_id\" and certificate leaf = H\"$cert_sha\""
+else
+    echo "WARNING: signing identity \"$identity\" not found, signing ad hoc. A copy signed with the certificate will not take updates from this build." >&2
+    sign_with="-"
+    requirement="designated => identifier \"$bundle_id\""
+fi
+# Nothing is nested (no helpers or frameworks); the main program is signed with the app.
+codesign --force --options runtime --sign "$sign_with" -r="$requirement" "$app"
+codesign --verify --deep --strict "$app"
+echo "Built $root/$app (signed: $sign_with)"
