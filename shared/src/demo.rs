@@ -18,11 +18,11 @@ fn sample(id: &str, kind: DeviceKind, connection: Connection, name: &str, batter
     }
 }
 
-/// Returns the author's two devices plus one unknown mouse, at the given %.
+/// Returns a keyboard and a mouse plus one unknown mouse, at the given %.
 pub fn sample_devices(keyboard_percent: u8, mouse_percent: u8) -> Vec<Device> {
     vec![
-        sample("demo:keyboard", DeviceKind::Keyboard, Connection::Dongle, "Kreo Swarm 75", Some((keyboard_percent, false)), Some("bytech")),
-        sample("demo:mouse", DeviceKind::Mouse, Connection::Dongle, "XS Flow+1", Some((mouse_percent, true)), Some("yuandaxin")),
+        sample("demo:keyboard", DeviceKind::Keyboard, Connection::Dongle, "Keyboard", Some((keyboard_percent, false)), Some("bytech")),
+        sample("demo:mouse", DeviceKind::Mouse, Connection::Dongle, "Mouse", Some((mouse_percent, true)), Some("yuandaxin")),
         sample("demo:unknown", DeviceKind::Mouse, Connection::Dongle, "Unknown mouse", None, None),
     ]
 }
