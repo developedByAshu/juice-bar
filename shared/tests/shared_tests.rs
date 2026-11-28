@@ -1,4 +1,4 @@
-use juicebar_shared::device::{Battery, Connection, Device, DeviceKind, NameSource};
+use juicebar_shared::device::{drop_idle_twins, Battery, Connection, Device, DeviceKind, NameSource};
 use juicebar_shared::names::{resolve_name, NameCandidates};
 use juicebar_shared::protocols::bytech::{build_request, parse_event, parse_power_answer, with_pushed_percent, Bytech, KeyboardEvent};
 use juicebar_shared::protocols::yuandaxin::{self, Yuandaxin};
@@ -229,4 +229,32 @@ fn reset_all_keeps_only_when_updates_were_last_checked() {
     assert_eq!(settings.last_update_check, 123);
     assert_eq!((settings.update_check, settings.keeps_on_top, settings.poll_minutes, settings.renames.len()), (UpdateCheck::Daily, false, 5, 0));
     assert!(!settings.is_saved_to_disk, "a preview stays a preview");
+}
+fn row(kind: DeviceKind, connection: Connection, vendor_id: u16, percent: u8) -> Device {
+    Device { id: format!("{connection:?}:{vendor_id}"), kind, connection, name: "x".into(), name_source: NameSource::DeviceReported, battery: Some(Battery { percent, is_charging: false }), protocol: Some("t"), vendor_id, product_id: 1 }
+}
+
+#[test]
+fn a_mouse_moved_to_bluetooth_hides_its_idle_dongle_row() {
+    let rows = vec![row(DeviceKind::Mouse, Connection::Dongle, 0x04F3, 55), row(DeviceKind::Mouse, Connection::Bluetooth, 0x04F3, 80)];
+    let kept = drop_idle_twins(rows);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].connection, Connection::Bluetooth);
+}
+
+#[test]
+fn different_devices_on_different_links_all_stay() {
+    let rows = vec![
+        row(DeviceKind::Keyboard, Connection::Dongle, 0x3554, 68),
+        row(DeviceKind::Mouse, Connection::Bluetooth, 0x04F3, 80),
+        row(DeviceKind::Mouse, Connection::Dongle, 0x1234, 40),
+        row(DeviceKind::Keyboard, Connection::Usb, 0x3554, 90),
+    ];
+    assert_eq!(drop_idle_twins(rows).len(), 4);
+}
+
+#[test]
+fn a_bluetooth_row_with_no_vendor_id_hides_nothing() {
+    let rows = vec![row(DeviceKind::Mouse, Connection::Dongle, 0, 55), row(DeviceKind::Mouse, Connection::Bluetooth, 0, 80)];
+    assert_eq!(drop_idle_twins(rows).len(), 2);
 }
