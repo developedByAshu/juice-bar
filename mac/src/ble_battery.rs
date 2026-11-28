@@ -127,8 +127,9 @@ fn with_reader<T>(work: impl FnOnce(&mut Reader) -> T) -> Option<T> {
     READER.with(|cell| cell.borrow_mut().as_mut().map(work))
 }
 
-/// Connects to every peripheral macOS has connected that offers the Battery Service, and re-reads the
-/// level of the ones already held (a missed notification must not leave an old %).
+/// Connects to every peripheral macOS has connected that offers the Battery Service. Each level is read
+/// ONCE per connection, then only notifications update it: some mice (RivieraWaves firmware, e.g. the
+/// XS Flow) raise the value on every read, so polling would make the % climb on its own.
 fn connect_all() {
     let Some((manager, delegate)) = with_reader(|reader| (reader.manager.clone(), reader.delegate.clone())) else {
         return;
@@ -145,13 +146,6 @@ fn connect_all() {
                 manager.connectPeripheral_options(&peripheral, None);
             }
             with_reader(|reader| reader.peripherals.insert(id, peripheral.clone()));
-        } else {
-            // SAFETY: services were discovered on the earlier connect.
-            for service in unsafe { peripheral.services() }.unwrap_or_default().iter() {
-                for characteristic in unsafe { service.characteristics() }.unwrap_or_default().iter() {
-                    unsafe { peripheral.readValueForCharacteristic(&characteristic) };
-                }
-            }
         }
     }
 }
