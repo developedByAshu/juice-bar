@@ -76,10 +76,27 @@ pub fn unknown_name(kind: DeviceKind) -> &'static str {
     }
 }
 
-/// Drops a dongle row while a Bluetooth row of the same kind and vendor is connected: that is the same
-/// device switched to Bluetooth with its dongle still plugged in, and the dongle row would show the last
-/// % it heard, stale. Different devices on different links (a Bluetooth mouse, a 2.4 GHz keyboard) all stay.
+/// Keeps one row for a device seen on both its dongle and Bluetooth (same kind and vendor): the row with a
+/// battery reading, preferring Bluetooth when both have one; with neither, the Bluetooth row (the live link).
+/// Some mice send a junk Bluetooth battery value while their dongle still reports the real %, so the reading
+/// decides, never the link. Different devices on different links (a Bluetooth mouse, a 2.4 GHz keyboard) all stay.
 pub fn drop_idle_twins(rows: Vec<Device>) -> Vec<Device> {
-    let on_bluetooth: Vec<(DeviceKind, u16)> = rows.iter().filter(|row| row.connection == Connection::Bluetooth && row.vendor_id != 0).map(|row| (row.kind, row.vendor_id)).collect();
-    rows.into_iter().filter(|row| row.connection != Connection::Dongle || !on_bluetooth.contains(&(row.kind, row.vendor_id))).collect()
+    let twin_key = |row: &Device| (row.kind, row.vendor_id);
+    let has_reading = |connection: Connection, key: (DeviceKind, u16)| rows.iter().any(|row| row.connection == connection && row.vendor_id != 0 && twin_key(row) == key && row.battery.is_some());
+    let has_row = |connection: Connection, key: (DeviceKind, u16)| rows.iter().any(|row| row.connection == connection && row.vendor_id != 0 && twin_key(row) == key);
+    let keep = |row: &Device| {
+        let key = twin_key(row);
+        let twinned = row.vendor_id != 0 && has_row(Connection::Bluetooth, key) && has_row(Connection::Dongle, key);
+        if !twinned {
+            return true;
+        }
+        let bluetooth_wins = has_reading(Connection::Bluetooth, key) || !has_reading(Connection::Dongle, key);
+        match row.connection {
+            Connection::Bluetooth => bluetooth_wins,
+            Connection::Dongle => !bluetooth_wins,
+            Connection::Usb => true,
+        }
+    };
+    let kept: Vec<bool> = rows.iter().map(keep).collect();
+    rows.into_iter().zip(kept).filter_map(|(row, keep)| keep.then_some(row)).collect()
 }
