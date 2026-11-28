@@ -26,9 +26,10 @@ pub struct UsbDevice {
 }
 
 impl UsbDevice {
-    /// Returns the stable id used for renames and hiding.
+    /// Returns the stable id used for renames and hiding. The serial is the device's own text, so it
+    /// is cleaned as the settings file saves it, and a saved rename still matches after a restart.
     pub fn id(&self) -> String {
-        format!("{:04x}:{:04x}:{}", self.vendor_id, self.product_id, self.serial)
+        format!("{:04x}:{:04x}:{}", self.vendor_id, self.product_id, crate::settings::clean_key(&self.serial))
     }
 
     /// Guesses mouse or keyboard from the interfaces, preferring the catalog.

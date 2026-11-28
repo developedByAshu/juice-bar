@@ -108,13 +108,26 @@ impl Default for Settings {
     }
 }
 
-/// Returns the folder that holds the settings: Application Support on Mac, AppData on Windows.
-pub fn data_folder() -> PathBuf {
-    if cfg!(windows) {
-        std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_default().join("JuiceBar")
-    } else {
-        std::env::var_os("HOME").map(PathBuf::from).unwrap_or_default().join("Library/Application Support/JuiceBar")
-    }
+/**
+ * Returns the folder that holds the settings: Application Support on Mac, AppData on Windows. None
+ * when HOME or APPDATA is unset or not a full path, so nothing is ever saved relative to wherever the
+ * app was started.
+ */
+pub fn data_folder() -> Option<PathBuf> {
+    let (variable, below) = if cfg!(windows) { ("APPDATA", "JuiceBar") } else { ("HOME", "Library/Application Support/JuiceBar") };
+    let base = PathBuf::from(std::env::var_os(variable)?);
+    base.is_absolute().then(|| base.join(below))
+}
+
+/// Returns a device id fit to be a key: no control characters (a new line would start a new
+/// setting) and no '=' (it ends the key). Ids can hold text the device reports, such as a USB serial.
+pub fn clean_key(id: &str) -> String {
+    id.chars().filter(|c| !c.is_control() && *c != '=').collect::<String>().trim().to_string()
+}
+
+/// Returns a value fit for one line: no control characters. A '=' is fine, only the first one splits.
+pub fn clean_value(value: &str) -> String {
+    value.chars().filter(|c| !c.is_control()).collect::<String>().trim().to_string()
 }
 
 impl Settings {
@@ -131,9 +144,9 @@ impl Settings {
             format!("update_check={}", self.update_check.number()),
             format!("last_update_check={}", self.last_update_check),
         ];
-        lines.extend(self.renames.iter().map(|(id, name)| format!("rename.{id}={name}")));
-        lines.extend(self.hidden.iter().map(|id| format!("hidden.{id}=1")));
-        lines.extend(self.confirmed_bluetooth_names.iter().map(|(id, name)| format!("bluetooth_name.{id}={name}")));
+        lines.extend(self.renames.iter().map(|(id, name)| format!("rename.{}={}", clean_key(id), clean_value(name))));
+        lines.extend(self.hidden.iter().map(|id| format!("hidden.{}=1", clean_key(id))));
+        lines.extend(self.confirmed_bluetooth_names.iter().map(|(id, name)| format!("bluetooth_name.{}={}", clean_key(id), clean_value(name))));
         lines.join("\n") + "\n"
     }
 
@@ -156,11 +169,11 @@ impl Settings {
                 "last_update_check" => settings.last_update_check = value.parse().unwrap_or(0),
                 _ => {
                     if let Some(id) = key.strip_prefix("rename.") {
-                        settings.renames.insert(id.to_string(), value.to_string());
+                        settings.renames.insert(clean_key(id), clean_value(value));
                     } else if let Some(id) = key.strip_prefix("hidden.") {
-                        settings.hidden.push(id.to_string());
+                        settings.hidden.push(clean_key(id));
                     } else if let Some(id) = key.strip_prefix("bluetooth_name.") {
-                        settings.confirmed_bluetooth_names.insert(id.to_string(), value.to_string());
+                        settings.confirmed_bluetooth_names.insert(clean_key(id), clean_value(value));
                     }
                 }
             }
@@ -184,15 +197,16 @@ impl Settings {
 
     /// Loads the saved choices, or the defaults when there are none yet.
     pub fn load() -> Self {
-        std::fs::read_to_string(data_folder().join(FILE_NAME)).map_or_else(|_| Self::default(), |text| Self::from_text(&text))
+        data_folder().and_then(|folder| std::fs::read_to_string(folder.join(FILE_NAME)).ok()).map_or_else(Self::default, |text| Self::from_text(&text))
     }
 
-    /// Saves through a temporary file, so a crash cannot damage the choices. Previews skip this.
+    /// Saves through a temporary file, so a crash cannot damage the choices. Previews, and a machine
+    /// with no home folder, skip this.
     pub fn save(&self) {
         if !self.is_saved_to_disk {
             return;
         }
-        let folder = data_folder();
+        let Some(folder) = data_folder() else { return };
         let temp_path = folder.join(TEMP_FILE_NAME);
         if std::fs::create_dir_all(&folder).and_then(|()| std::fs::write(&temp_path, self.to_text())).is_ok() {
             let _ = std::fs::rename(&temp_path, folder.join(FILE_NAME));

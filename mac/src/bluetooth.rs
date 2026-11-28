@@ -70,7 +70,7 @@ pub fn bluetooth_devices(entries: &[BluetoothEntry]) -> Vec<Device> {
             let exact = juicebar_shared::catalog::find_by_ids(entry.vendor_id, entry.product_id).filter(|known| !known.brand_shared);
             let (name, name_source) = exact.map_or((entry.name.clone(), NameSource::DeviceReported), |known| (known.family_name.to_string(), NameSource::Catalog));
             Some(Device {
-                id: format!("bluetooth:{}", entry.name),
+                id: format!("bluetooth:{}", juicebar_shared::settings::clean_key(&entry.name)),
                 kind: entry.kind,
                 connection: Connection::Bluetooth,
                 name,
