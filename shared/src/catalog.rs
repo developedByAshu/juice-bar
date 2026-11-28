@@ -38,7 +38,6 @@ const fn entry(
 pub const CATALOG: &[KnownDevice] = &[
     // Kreo, from the device list in Kreo Kontrol (kontrol.kreo-tech.com), 23 Nov 2026.
     entry(0x3554, 0xFA09, 0xFF02, "bytech", DeviceKind::Keyboard, "Kreo Swarm 75", false, true),
-    entry(0x258A, 0x010C, 0xFF00, "bytech", DeviceKind::Keyboard, "Kreo Swarm 75", false, false),
     entry(0x04F3, 0x026F, 0x000A, "yuandaxin", DeviceKind::Mouse, "Yuandaxin wireless mouse", true, true),
     entry(0x04F3, 0x026E, 0x000A, "yuandaxin", DeviceKind::Mouse, "Yuandaxin mouse", true, false),
     // The same devices over Bluetooth, read through the OS (ids seen on Windows, 23 Nov 2026).
