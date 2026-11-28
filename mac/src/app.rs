@@ -54,8 +54,8 @@ struct App {
     slept: std::collections::HashMap<String, juicebar_shared::device::Battery>,
     /// False until the first update timer fires, which is the "On launch" check.
     has_launch_check_run: bool,
-    /// A downloaded, checked update waiting for the settings window to close.
-    waiting_update: Option<PathBuf>,
+    /// A downloaded, checked update and its version, waiting for the settings window to close.
+    waiting_update: Option<(String, PathBuf)>,
 }
 
 thread_local! {
@@ -687,8 +687,9 @@ pub fn on_update_timer() {
 }
 
 /**
- * Takes a step of the update check: saves when GitHub answered, and swaps in a checked update once
- * the settings window is closed. The app then quits, and the install script opens the new copy.
+ * Takes a step of the update check: saves when GitHub answered, and once the settings window is
+ * closed asks before a checked update goes in. On Install the app quits and the install script opens
+ * the new copy; on Later the download is kept and the next check asks again.
  */
 pub fn on_update() {
     if let Some(outcome) = updater::take_outcome() {
@@ -708,10 +709,28 @@ pub fn on_update() {
     if crate::settings_ui::is_open() {
         return;
     }
-    let Some(new_copy) = with_app(|app| app.waiting_update.take()).flatten() else {
+    let Some((version, new_copy)) = with_app(|app| app.waiting_update.take()).flatten() else {
         return;
     };
+    if !asks_to_install(&version) {
+        return;
+    }
     if updater::install(&new_copy) {
+        updater::forget_ready();
         NSApplication::sharedApplication(main_thread()).terminate(None);
     }
+}
+
+/// Asks "Juice Bar 0.2.0 is ready. Install now?" with Install and Later. Returns true for Install.
+fn asks_to_install(version: &str) -> bool {
+    let mtm = main_thread();
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&objc2_foundation::NSString::from_str(&juicebar_shared::update::install_question("Juice Bar", version)));
+    alert.setInformativeText(&objc2_foundation::NSString::from_str("Juice Bar quits, swaps in the new version and opens again."));
+    alert.addButtonWithTitle(&objc2_foundation::NSString::from_str("Install"));
+    alert.addButtonWithTitle(&objc2_foundation::NSString::from_str("Later"));
+    let application = NSApplication::sharedApplication(mtm);
+    // SAFETY: a plain call on the shared application; a menu bar app must come forward for its alert to show.
+    let _: () = unsafe { objc2::msg_send![&*application, activateIgnoringOtherApps: true] };
+    alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
 }
