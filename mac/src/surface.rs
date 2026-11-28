@@ -12,6 +12,9 @@ use objc2_app_kit::{
 use objc2_foundation::{NSDictionary, NSPoint, NSRect, NSSize, NSString};
 
 pub const KEY_ESCAPE: u16 = 53;
+// AppKit's normal and floating window levels, as NetSpeedGauge's surface names them.
+pub const WINDOW_LEVEL_NORMAL: isize = 0;
+pub const WINDOW_LEVEL_FLOATING: isize = 3;
 
 define_class!(
     #[unsafe(super = NSView)]

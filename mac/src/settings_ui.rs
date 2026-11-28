@@ -8,12 +8,13 @@
 
 use crate::canvas::{self, mix, Align, Font, WEIGHT_REGULAR, WEIGHT_SEMIBOLD};
 use crate::delegate::{delegate, main_thread, start_timer};
-use crate::surface::{self, SettingsView, KEY_ESCAPE};
+use crate::surface::{self, SettingsView, KEY_ESCAPE, WINDOW_LEVEL_FLOATING, WINDOW_LEVEL_NORMAL};
 use crate::theme::{apply_title_bar, current_theme, dark_theme, draw_made_with_love, light_theme, Theme};
-use crate::{app, startup};
+use crate::{app, startup, updater};
 use juicebar_shared::device::{Connection, Device, DeviceKind};
 use juicebar_shared::names::short_name;
-use juicebar_shared::settings::{HoverAction, Settings, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
+use juicebar_shared::settings::{HoverAction, Settings, MAX_WINDOW_THEME, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
+use juicebar_shared::update::{status_text, UpdateCheck, UPDATE_CHECK_LABELS};
 use objc2::rc::Retained;
 use objc2::runtime::AnyObject;
 use objc2::sel;
@@ -42,6 +43,9 @@ const NAV_TOP: i32 = 62;
 const NAV_ROW: i32 = 40;
 // Space each side of a segment's text. The system font runs wider than Windows', so this is tighter than there.
 const SEGMENT_PADDING: i32 = 8;
+// Five options leave the label too little room at that padding, so they sit closer, as on Windows.
+const COMPACT_SEGMENT_PADDING: i32 = 5;
+const COMPACT_SEGMENT_COUNT: usize = 5;
 const TOGGLE_WIDTH: i32 = 40;
 const FIELD_HEIGHT: i32 = 30;
 const FIELD_GAP: i32 = 16;
@@ -88,10 +92,12 @@ const MIN_POLL_MINUTES: u32 = 1;
 const MAX_POLL_MINUTES: u32 = 60;
 const HOVER_OPTIONS: [&str; 2] = ["Nothing", "Battery card"];
 const CLICK_OPTIONS: [&str; 2] = ["Devices", "Settings"];
+// NetSpeedGauge's window theme options, in its order: 0 system, 1 light, 2 dark.
+const THEME_OPTIONS: [&str; 3] = ["Same as system", "Light", "Dark"];
 
 /// What Juice Bar does and does not do with data, shown on the Details page.
 const PRIVACY_LINES: [&str; 4] = [
-    "Nothing leaves this Mac. It never connects to the internet.",
+    "Only connects to GitHub to check for updates. Nothing about you is sent.",
     "It only reads battery levels from your mice and keyboards.",
     "Your names and settings are stored only on this computer.",
     "No account, no tracking, no ads and no servers.",
@@ -102,6 +108,8 @@ const DEVELOPER_NAME: &str = "Ashutosh Anand";
 const DEVELOPER_ORIGIN: &str = "From India";
 const APP_TAGLINE: &str = "Mouse and keyboard battery in the menu bar.";
 const RESET_DETAIL: [&str; 2] = ["Names, hidden devices, the check interval and the %", "next to the icon go back to their defaults."];
+const RESET_ALL_DONE_TEXT: &str = "Done. Every setting is back to its default.";
+const RESET_PAGE_DONE_TEXT: &str = "Done. Appearance is back to its default.";
 
 /// One row on a page.
 #[derive(Clone, Copy)]
@@ -112,23 +120,37 @@ enum Row {
     ShowPercent,
     MenuTextSize,
     PollInterval,
+    WindowTheme,
     OnHover,
     OnClick,
+    KeepOnTop,
+    UpdateCheck,
+    CheckNow,
     DeviceList,
+    ResetPage,
     ResetAll,
     AboutCard,
     Privacy,
     Developer,
 }
 
-const GENERAL_ROWS: &[Row] = &[Row::Section("Startup"), Row::LaunchAtLogin, Row::Section("Battery checks"), Row::PollInterval];
-const APPEARANCE_ROWS: &[Row] = &[Row::Section("Menu bar icon"), Row::ShowPercent, Row::Section("Menu"), Row::MenuTextSize];
+const GENERAL_ROWS: &[Row] = &[
+    Row::Section("Startup"),
+    Row::LaunchAtLogin,
+    Row::Section("Battery checks"),
+    Row::PollInterval,
+    Row::Section("Updates"),
+    Row::UpdateCheck,
+    Row::CheckNow,
+];
+// NetSpeedGauge's Appearance page opens with the same Theme row.
+const APPEARANCE_ROWS: &[Row] = &[Row::Section("Theme"), Row::WindowTheme, Row::Section("Menu bar icon"), Row::ShowPercent, Row::Section("Menu"), Row::MenuTextSize];
 const DEVICES_ROWS: &[Row] = &[
     Row::Section("Your devices"),
     Row::Note("Click the pencil to give a device a name you will recognise.\nSwitch a device off to leave it out of the menu and the icon."),
     Row::DeviceList,
 ];
-const ADVANCED_ROWS: &[Row] = &[Row::Section("Behaviour"), Row::OnHover, Row::OnClick, Row::Section("Reset"), Row::ResetAll];
+const ADVANCED_ROWS: &[Row] = &[Row::Section("Behaviour"), Row::OnHover, Row::OnClick, Row::KeepOnTop, Row::Section("Reset"), Row::ResetPage, Row::ResetAll];
 const ABOUT_ROWS: &[Row] = &[Row::AboutCard, Row::Section("Privacy"), Row::Privacy, Row::Section("Know your developer"), Row::Developer];
 
 fn page_rows(page: usize) -> &'static [Row] {
@@ -151,10 +173,15 @@ enum Action {
     SetMenuFont(u32),
     SetHover(u8),
     SetClick(u8),
+    SetTheme(u8),
+    SetUpdateCheck(u8),
+    ToggleOnTop,
+    CheckNow,
     ToggleShown(usize),
     EditName(usize),
     SaveName(usize),
     CancelName,
+    ResetPage,
     AskReset,
     CancelReset,
     ConfirmReset,
@@ -222,7 +249,8 @@ struct SettingsWindow {
     hits: Vec<HitArea>,
     hover: Option<Action>,
     is_confirming_reset: bool,
-    is_reset_done: bool,
+    /// The reset row whose hint shows the green "done" line for a few seconds: its button's action.
+    reset_done: Option<Action>,
     done_timer: Option<Retained<NSTimer>>,
     /// The one row being renamed, if any. Only ✓ or Return saves it; anything else cancels it.
     editing: Option<usize>,
@@ -297,7 +325,18 @@ impl SettingsWindow {
         match row {
             Row::Section(_) => SECTION_GAP + 8,
             Row::Note(_) => NOTE_HEIGHT,
-            Row::LaunchAtLogin | Row::ShowPercent | Row::MenuTextSize | Row::PollInterval | Row::OnHover | Row::OnClick | Row::ResetAll => ROW_HEIGHT + ROW_GAP,
+            Row::LaunchAtLogin
+            | Row::ShowPercent
+            | Row::MenuTextSize
+            | Row::PollInterval
+            | Row::WindowTheme
+            | Row::OnHover
+            | Row::OnClick
+            | Row::KeepOnTop
+            | Row::UpdateCheck
+            | Row::CheckNow
+            | Row::ResetPage
+            | Row::ResetAll => ROW_HEIGHT + ROW_GAP,
             Row::DeviceList => self.devices.len().max(1) as i32 * (ROW_HEIGHT + ROW_GAP),
             Row::AboutCard => ABOUT_CARD_HEIGHT + ROW_GAP,
             Row::Privacy => privacy_height() + ROW_GAP,
@@ -473,8 +512,26 @@ impl SettingsWindow {
                 let chosen = u8::from(app::is_click_settings(&self.settings));
                 self.draw_segments(left + width - 14, y, &CLICK_OPTIONS, chosen, Action::SetClick);
             }
+            Row::WindowTheme => {
+                self.row_card(left, y, width, ROW_HEIGHT);
+                self.row_label(left, y, "Juice Bar windows", "");
+                let chosen = self.settings.window_theme;
+                self.draw_segments(left + width - 14, y, &THEME_OPTIONS, chosen, Action::SetTheme);
+            }
+            Row::KeepOnTop => {
+                let is_on = self.settings.keeps_on_top;
+                self.draw_toggle_row(left, y, width, ("Keep windows on top", "Settings stays above other apps"), is_on, Action::ToggleOnTop);
+            }
+            Row::UpdateCheck => {
+                self.row_card(left, y, width, ROW_HEIGHT);
+                self.row_label(left, y, "Check for updates", "");
+                let chosen = self.settings.update_check.number() as u8;
+                self.draw_segments(left + width - 14, y, &UPDATE_CHECK_LABELS, chosen, Action::SetUpdateCheck);
+            }
+            Row::CheckNow => self.draw_check_now_row(left, y, width),
             Row::DeviceList => self.draw_device_list(left, y, width),
-            Row::ResetAll => self.draw_reset_row(left, y, width),
+            Row::ResetPage => self.draw_reset_row(left, y, width, Action::ResetPage),
+            Row::ResetAll => self.draw_reset_row(left, y, width, Action::AskReset),
             Row::AboutCard => self.draw_about_card(left, y, width),
             Row::Developer => {
                 self.row_card(left, y, width, ROW_HEIGHT);
@@ -520,7 +577,8 @@ impl SettingsWindow {
     /// Draws a segmented choice ending at `right`, as NetSpeedGauge's: the chosen option on a raised pill.
     fn draw_segments(&mut self, right: i32, y: i32, options: &[&str], chosen: u8, action_for: fn(u8) -> Action) {
         let theme = self.theme;
-        let widths: Vec<i32> = options.iter().map(|option| canvas::text_width(option, &self.fonts.strong) + SEGMENT_PADDING * 2).collect();
+        let padding = if options.len() >= COMPACT_SEGMENT_COUNT { COMPACT_SEGMENT_PADDING } else { SEGMENT_PADDING };
+        let widths: Vec<i32> = options.iter().map(|option| canvas::text_width(option, &self.fonts.strong) + padding * 2).collect();
         let total: i32 = widths.iter().sum();
         let (height, top) = (32, y + 9);
         let mut x = right - total;
@@ -634,19 +692,39 @@ impl SettingsWindow {
         width
     }
 
-    /// Draws the reset row. Just after a reset its hint turns into a green "done" line for a few seconds.
-    fn draw_reset_row(&mut self, left: i32, y: i32, width: i32) {
+    /**
+     * Draws a reset row: Appearance's own Reset (`ResetPage`) or Reset all (`AskReset`). Just after
+     * its reset the hint turns into a green "done" line for a few seconds.
+     */
+    fn draw_reset_row(&mut self, left: i32, y: i32, width: i32, action: Action) {
+        let theme = self.theme;
+        let (label, hint, done_text, button) = if action == Action::ResetPage {
+            // NetSpeedGauge's "Reset this page" row, for Juice Bar's one page of looks.
+            ("Appearance", "Back to how Juice Bar started", RESET_PAGE_DONE_TEXT, "Reset")
+        } else {
+            ("Every setting", "Renames, hidden devices and the check interval", RESET_ALL_DONE_TEXT, "Reset all")
+        };
+        self.row_card(left, y, width, ROW_HEIGHT);
+        if self.reset_done == Some(action) {
+            canvas::text(left + 14, y + 7, label, &self.fonts.body, theme.text, Align::Left);
+            canvas::symbol(left + 20, y + 27 + self.fonts.small.box_height / 2, ICON_DONE, 8.0, theme.good);
+            canvas::text(left + 30, y + 27, done_text, &self.fonts.small, theme.good, Align::Left);
+        } else {
+            self.row_label(left, y, label, hint);
+        }
+        let fill = if self.is_hover(action) { theme.button_hover } else { theme.button };
+        self.draw_button(left + width - 14, y + (ROW_HEIGHT - BUTTON_HEIGHT) / 2, button, (fill, theme.text), action);
+    }
+
+    /// Draws the Check now row: where the update check stands, as its hint, and its button.
+    fn draw_check_now_row(&mut self, left: i32, y: i32, width: i32) {
         let theme = self.theme;
         self.row_card(left, y, width, ROW_HEIGHT);
-        if self.is_reset_done {
-            canvas::text(left + 14, y + 7, "Every setting", &self.fonts.body, theme.text, Align::Left);
-            canvas::symbol(left + 20, y + 27 + self.fonts.small.box_height / 2, ICON_DONE, 8.0, theme.good);
-            canvas::text(left + 30, y + 27, "Done. Every setting is back to its default.", &self.fonts.small, theme.good, Align::Left);
-        } else {
-            self.row_label(left, y, "Every setting", "Renames, hidden devices and the check interval");
-        }
-        let fill = if self.is_hover(Action::AskReset) { theme.button_hover } else { theme.button };
-        self.draw_button(left + width - 14, y + (ROW_HEIGHT - BUTTON_HEIGHT) / 2, "Reset all", (fill, theme.text), Action::AskReset);
+        let last_checked = updater::time_label(self.settings.last_update_check);
+        let hint = status_text(&updater::status(), juicebar_shared::APP_VERSION, last_checked.as_deref());
+        self.row_label(left, y, "Check now", &hint);
+        let fill = if self.is_hover(Action::CheckNow) { theme.button_hover } else { theme.button };
+        self.draw_button(left + width - 14, y + (ROW_HEIGHT - BUTTON_HEIGHT) / 2, "Check now", (fill, theme.text), Action::CheckNow);
     }
 
     /// Draws the app card: the Juice Bar glass on a tinted tile, the name, a line about it and the version.
@@ -752,6 +830,26 @@ impl SettingsWindow {
                 self.settings.click_action = app::click_choice(choice == 1);
                 effects.apply = Some(self.settings.clone());
             }
+            Action::SetTheme(choice) => {
+                self.settings.window_theme = choice.min(MAX_WINDOW_THEME);
+                effects.apply = Some(self.settings.clone());
+            }
+            Action::SetUpdateCheck(choice) => {
+                self.settings.update_check = UpdateCheck::from_number(i64::from(choice));
+                effects.apply = Some(self.settings.clone());
+            }
+            Action::ToggleOnTop => {
+                self.settings.keeps_on_top = !self.settings.keeps_on_top;
+                set_on_top(&self.window, self.settings.keeps_on_top);
+                effects.apply = Some(self.settings.clone());
+            }
+            Action::CheckNow => updater::check_now(),
+            Action::ResetPage => {
+                self.settings.reset_appearance();
+                self.reset_done = Some(Action::ResetPage);
+                effects.apply = Some(self.settings.clone());
+                effects.starts_done_timer = true;
+            }
             Action::ToggleShown(index) => {
                 let Some(id) = self.devices.get(index).map(|device| device.id.clone()) else {
                     return effects;
@@ -765,7 +863,7 @@ impl SettingsWindow {
             }
             Action::AskReset => {
                 self.is_confirming_reset = true;
-                self.is_reset_done = false;
+                self.reset_done = None;
                 effects.layout = true;
             }
             Action::CancelReset => {
@@ -773,11 +871,12 @@ impl SettingsWindow {
                 effects.layout = true;
             }
             Action::ConfirmReset => {
-                let fresh = Settings { is_saved_to_disk: self.settings.is_saved_to_disk, ..Settings::default() };
-                self.settings = fresh.clone();
+                // When updates were last checked is a record, not a choice, so reset_all keeps it.
+                self.settings.reset_all();
+                set_on_top(&self.window, false);
                 self.is_confirming_reset = false;
-                self.is_reset_done = true;
-                effects = Effects { apply: Some(fresh), layout: true, starts_done_timer: true, ..Effects::default() };
+                self.reset_done = Some(Action::AskReset);
+                effects = Effects { apply: Some(self.settings.clone()), layout: true, starts_done_timer: true, ..Effects::default() };
             }
         }
         self.hover = None;
@@ -789,6 +888,11 @@ impl SettingsWindow {
     fn action_at(&self, x: i32, y: i32) -> Option<Action> {
         self.hits.iter().rev().find(|hit| x >= hit.x && x < hit.x + hit.width && y >= hit.y && y < hit.y + hit.height).map(|hit| hit.action)
     }
+}
+
+/// Keeps the window above other apps or lets it sit among them, as NetSpeedGauge's "Keep windows on top".
+fn set_on_top(window: &NSWindow, keeps_on_top: bool) {
+    window.setLevel(if keeps_on_top { WINDOW_LEVEL_FLOATING } else { WINDOW_LEVEL_NORMAL });
 }
 
 /// Saves the settings and applies them everywhere. If the app state is busy (a scan's redraw ended an edit), it runs a moment later.
@@ -1109,6 +1213,7 @@ fn build(settings: Settings, devices: Vec<Device>) -> Retained<NSWindow> {
     let (window, view) = surface::create_window(WIDTH, HEIGHT, WINDOW_TITLE);
     let theme = current_theme();
     apply_title_bar(&window, &theme);
+    set_on_top(&window, settings.keeps_on_top);
     let state = SettingsWindow {
         window: window.clone(),
         view,
@@ -1123,7 +1228,7 @@ fn build(settings: Settings, devices: Vec<Device>) -> Retained<NSWindow> {
         hits: Vec::new(),
         hover: None,
         is_confirming_reset: false,
-        is_reset_done: false,
+        reset_done: None,
         done_timer: None,
         editing: None,
         saved_row: None,
@@ -1185,12 +1290,24 @@ pub fn on_closed() {
         drop(state);
     }
     sync_dock_entry();
+    // An update downloaded while Settings was open goes in now, once the close has finished.
+    dispatch2::DispatchQueue::main().exec_async(app::on_update);
+}
+
+/// Returns true while the settings window is open; an update waits for it to close.
+pub fn is_open() -> bool {
+    WINDOW.with(|cell| cell.try_borrow().map(|state| state.is_some()).unwrap_or(true))
+}
+
+/// Redraws the open window, so the Check now row shows the update check's latest step.
+pub fn refresh() {
+    with_window(|state| state.invalidate());
 }
 
 /// Hides the reset done cue a few seconds after a reset.
 pub fn hide_reset_note() {
     with_window(|state| {
-        state.is_reset_done = false;
+        state.reset_done = None;
         state.done_timer = None;
         state.invalidate();
     });
@@ -1267,7 +1384,8 @@ pub fn preview_theme(is_dark: bool) {
     }
 }
 
-/// Clicks an area as a user would, for checks: "page:N", "percent", "poll:N", "menu_font:N", "hover:N", "click:N", "show:N", "ask_reset", "cancel_reset", "confirm_reset".
+/// Clicks an area as a user would, for checks: "page:N", "percent", "poll:N", "menu_font:N", "hover:N", "click:N", "theme:N", "update_check:N",
+/// "on_top", "show:N", "reset_page", "ask_reset", "cancel_reset", "confirm_reset".
 /// Returns false when no such area is showing.
 pub fn click_for_checks(name: &str) -> bool {
     let (kind, number) = name.split_once(':').map_or((name, 0), |(kind, number)| (kind, number.parse().unwrap_or(0)));
@@ -1278,10 +1396,14 @@ pub fn click_for_checks(name: &str) -> bool {
         "menu_font" => Action::SetMenuFont(number as u32),
         "hover" => Action::SetHover(number as u8),
         "click" => Action::SetClick(number as u8),
+        "theme" => Action::SetTheme(number as u8),
+        "update_check" => Action::SetUpdateCheck(number as u8),
+        "on_top" => Action::ToggleOnTop,
         "show" => Action::ToggleShown(number),
         "edit" => Action::EditName(number),
         "save" => Action::SaveName(number),
         "cancel_name" => Action::CancelName,
+        "reset_page" => Action::ResetPage,
         "ask_reset" => Action::AskReset,
         "cancel_reset" => Action::CancelReset,
         "confirm_reset" => Action::ConfirmReset,
@@ -1368,7 +1490,7 @@ pub fn press_escape_for_checks() {
 
 /// Returns whether the reset done cue is showing, for checks.
 pub fn is_reset_done_for_checks() -> bool {
-    with_window(|state| state.is_reset_done).unwrap_or(false)
+    with_window(|state| state.reset_done.is_some()).unwrap_or(false)
 }
 
 /// Returns the settings the window shows, for checks.

@@ -6,6 +6,7 @@ use crate::delegate::main_thread;
 use juicebar_shared::tone::Tone;
 use objc2::rc::Retained;
 use objc2_app_kit::{NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSColor, NSColorSpace, NSWindow};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 const FALLBACK_ACCENT: u32 = 0x4C9AFF;
 const MADE_WITH_LOVE: &str = "Made in India with ";
@@ -13,6 +14,8 @@ const ICON_HEART: &str = "heart.fill";
 const HEART_COLOR: u32 = 0xE5484D;
 const HEART_POINTS: f64 = 8.0;
 const HEART_BOX: i32 = 14;
+
+static THEME_CHOICE: AtomicU8 = AtomicU8::new(0);
 
 /// Returns the system colour for a tone. Plain is the normal text colour.
 pub fn tone_color(tone: Tone) -> Retained<NSColor> {
@@ -140,12 +143,26 @@ pub fn light_theme() -> Theme {
     light_palette(accent_color())
 }
 
-/// Returns the colours for the Mac's current light or dark look.
+/// Sets the user's choice for Juice Bar's windows, as NetSpeedGauge's: 0 follows the Mac, 1 is light, 2 is dark.
+pub fn set_theme_choice(choice: u8) {
+    THEME_CHOICE.store(choice, Ordering::Relaxed);
+}
+
+/**
+ * Returns the colours for Juice Bar's windows: the user's theme choice, or the Mac's current light or
+ * dark look when it follows the Mac. The menu bar icon and the menu keep following the Mac.
+ */
 pub fn current_theme() -> Theme {
-    if current_theme_is_dark() {
-        dark_theme()
-    } else {
-        light_theme()
+    match THEME_CHOICE.load(Ordering::Relaxed) {
+        1 => light_theme(),
+        2 => dark_theme(),
+        _ => {
+            if current_theme_is_dark() {
+                dark_theme()
+            } else {
+                light_theme()
+            }
+        }
     }
 }
 

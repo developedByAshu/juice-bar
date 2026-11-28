@@ -86,6 +86,11 @@ define_class!(
             app::refresh();
         }
 
+        #[unsafe(method(updateTimer:))]
+        fn update_timer(&self, _timer: &NSTimer) {
+            app::on_update_timer();
+        }
+
         #[unsafe(method(didWake:))]
         fn did_wake(&self, _notification: &NSNotification) {
             app::refresh();

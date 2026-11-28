@@ -21,3 +21,5 @@ pub mod status_icon;
 pub mod surface;
 #[cfg(target_os = "macos")]
 pub mod theme;
+#[cfg(target_os = "macos")]
+pub mod updater;

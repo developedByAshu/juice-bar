@@ -5,19 +5,27 @@ use crate::bluetooth::{bluetooth_devices, read_bluetooth_entries, remembered_blu
 use crate::delegate::{delegate, main_thread, start_timer, watch_system_events};
 use crate::menu_ui::{self, PopupKind};
 use crate::status_icon;
+use crate::theme::set_theme_choice;
+use crate::updater;
 use juicebar_shared::demo::{is_demo_mode, sample_devices};
 use juicebar_shared::device::Device;
 use juicebar_shared::report::report_url;
 use juicebar_shared::scan::{build_device, probe_usb_device, scan_dongles, ScannedDevice, UsbDevice};
 use juicebar_shared::settings::{ClickAction, HoverAction, Settings};
 use juicebar_shared::tone::{icon_tone, lowest_percent};
+use juicebar_shared::update::is_check_due;
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
 use objc2::sel;
 use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy, NSMenu, NSStatusItem};
 use objc2_foundation::NSTimer;
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Sender};
+
+// The first look for an update waits, so it never slows startup; then it looks hourly whether one is due.
+const LAUNCH_CHECK_DELAY_SECONDS: f64 = 30.0;
+const UPDATE_RECHECK_SECONDS: f64 = 60.0 * 60.0;
 
 /// Everything kept between scans.
 struct App {
@@ -44,6 +52,10 @@ struct App {
     /// Each keyboard's last % from just before it fell asleep (row id to battery), put back the moment it
     /// wakes, so a wake read that misses does not leave the row blank until the next check.
     slept: std::collections::HashMap<String, juicebar_shared::device::Battery>,
+    /// False until the first update timer fires, which is the "On launch" check.
+    has_launch_check_run: bool,
+    /// A downloaded, checked update waiting for the settings window to close.
+    waiting_update: Option<PathBuf>,
 }
 
 thread_local! {
@@ -71,10 +83,12 @@ pub fn finish_startup() {
     menu.setDelegate(Some(ProtocolObject::from_ref(&*delegate())));
     status_icon::watch_clicks_and_hover(&status_item);
     let settings = Settings::load();
+    set_theme_choice(settings.window_theme);
     let poll_timer = Some(start_timer(f64::from(settings.poll_minutes) * 60.0, sel!(poll:), true));
     APP.with(|cell| {
-        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false, open_popup: None, hover_timer: None, last_read: std::collections::HashMap::new(), asleep: Vec::new(), slept: std::collections::HashMap::new() });
+        *cell.borrow_mut() = Some(App { status_item, menu, settings, scanned: Vec::new(), bluetooth: Vec::new(), devices: Vec::new(), found: Vec::new(), shown: Vec::new(), poll_timer, is_scanning: false, open_popup: None, hover_timer: None, last_read: std::collections::HashMap::new(), asleep: Vec::new(), slept: std::collections::HashMap::new(), has_launch_check_run: false, waiting_update: None });
     });
+    start_timer(LAUNCH_CHECK_DELAY_SECONDS, sel!(updateTimer:), false);
     with_app(sync_item_menu);
     watch_system_events();
     refresh();
@@ -628,9 +642,15 @@ pub fn settings_and_devices() -> Option<(Settings, Vec<Device>)> {
 pub fn apply_settings(settings: Settings) -> bool {
     with_app(|app| {
         let interval_changed = settings.poll_minutes != app.settings.poll_minutes;
+        let theme_changed = settings.window_theme != app.settings.window_theme;
         settings.save();
         app.settings = settings;
         sync_item_menu(app);
+        if theme_changed {
+            // Only Juice Bar's own window follows the choice; the menu bar icon keeps the Mac's look.
+            set_theme_choice(app.settings.window_theme);
+            crate::settings_ui::apply_theme();
+        }
         if interval_changed {
             if let Some(timer) = app.poll_timer.take() {
                 timer.invalidate();
@@ -640,4 +660,50 @@ pub fn apply_settings(settings: Settings) -> bool {
         rebuild(app);
     })
     .is_some()
+}
+
+/// Looks for an update when the chosen interval says one is due. The first run is the launch check.
+pub fn on_update_timer() {
+    let due = with_app(|app| {
+        let is_launch = !app.has_launch_check_run;
+        if is_launch {
+            app.has_launch_check_run = true;
+            // The one-shot launch timer has fired; the hourly one takes over.
+            start_timer(UPDATE_RECHECK_SECONDS, sel!(updateTimer:), true);
+        }
+        is_check_due(app.settings.update_check, app.settings.last_update_check, updater::now_seconds(), is_launch)
+    });
+    if due == Some(true) {
+        updater::check_now();
+    }
+}
+
+/**
+ * Takes a step of the update check: saves when GitHub answered, and swaps in a checked update once
+ * the settings window is closed. The app then quits, and the install script opens the new copy.
+ */
+pub fn on_update() {
+    if let Some(outcome) = updater::take_outcome() {
+        with_app(|app| {
+            if let Some(checked_at) = outcome.checked_at {
+                app.settings.last_update_check = checked_at;
+                app.settings.save();
+                // The open window keeps its own copy, so it must not save the old time back later.
+                crate::settings_ui::on_devices_changed(&app.settings, &app.found);
+            }
+            if outcome.new_copy.is_some() {
+                app.waiting_update = outcome.new_copy;
+            }
+        });
+    }
+    crate::settings_ui::refresh();
+    if crate::settings_ui::is_open() {
+        return;
+    }
+    let Some(new_copy) = with_app(|app| app.waiting_update.take()).flatten() else {
+        return;
+    };
+    if updater::install(&new_copy) {
+        NSApplication::sharedApplication(main_thread()).terminate(None);
+    }
 }
