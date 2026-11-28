@@ -232,10 +232,12 @@ impl Canvas {
         // SAFETY: the surface and font are valid, and `wide` outlives the call.
         unsafe {
             GdiFlush();
-            SelectObject(self.target.surface, font);
+            let previous = SelectObject(self.target.surface, font);
             SetTextColor(self.target.surface, windows_color);
             TextOutW(self.target.surface, left, y, wide.as_ptr(), wide.len() as i32);
             GdiFlush();
+            // A font left selected cannot be deleted, so the caller's DeleteObject would fail and leak it.
+            SelectObject(self.target.surface, previous);
         }
     }
 
@@ -282,8 +284,9 @@ impl Canvas {
         let mut size = SIZE { cx: 0, cy: 0 };
         // SAFETY: `wide` and `size` are valid for the duration of the calls.
         unsafe {
-            SelectObject(self.target.surface, font);
+            let previous = SelectObject(self.target.surface, font);
             GetTextExtentPoint32W(self.target.surface, wide.as_ptr(), wide.len() as i32, &mut size);
+            SelectObject(self.target.surface, previous);
         }
         (if text.is_empty() { 0 } else { size.cx }, size.cy)
     }
