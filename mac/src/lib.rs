@@ -3,6 +3,8 @@
 #[cfg(target_os = "macos")]
 pub mod app;
 #[cfg(target_os = "macos")]
+pub mod ble_battery;
+#[cfg(target_os = "macos")]
 pub mod bluetooth;
 #[cfg(target_os = "macos")]
 pub mod canvas;

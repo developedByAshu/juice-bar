@@ -346,8 +346,10 @@ fn rebuild(app: &mut App) {
         sample_devices(82, 15)
     } else {
         let mut rows: Vec<Device> = app.scanned.iter().map(|scanned| scanned.device.clone()).collect();
-        rows.extend(bluetooth_devices(&app.bluetooth));
-        rows
+        let mut bluetooth = app.bluetooth.clone();
+        crate::ble_battery::fill_levels(&mut bluetooth);
+        rows.extend(bluetooth_devices(&bluetooth));
+        juicebar_shared::device::drop_idle_twins(rows)
     };
     app.found = rows.clone();
     for row in &mut rows {
@@ -424,6 +426,7 @@ fn start_hid_thread() -> Sender<HidJob> {
                             with_app(|app| {
                                 let scanned = keep_recent_readings(app, scanned);
                                 app.scanned = scanned;
+                                crate::ble_battery::refresh(&bluetooth);
                                 app.bluetooth = bluetooth;
                                 app.is_scanning = false;
                                 rebuild(app);
@@ -566,6 +569,11 @@ fn send_hid_job(job: HidJob) {
         let sender = slot.get_or_insert_with(start_hid_thread);
         let _ = sender.send(job);
     });
+}
+
+/// A Bluetooth device reported a new level or went away: redraw with what is known.
+pub fn on_bluetooth_battery() {
+    with_app(rebuild);
 }
 
 /// Asks the HID thread for a fresh scan of dongles and Bluetooth, unless one is running.

@@ -21,6 +21,7 @@ juicebar-shared = { path = "../shared" }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+objc2-core-bluetooth = "0.3"
 block2 = "0.6"
 dispatch2 = "0.3"
 hidapi = { version = "2.6", default-features = false }
