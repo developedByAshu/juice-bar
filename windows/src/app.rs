@@ -29,7 +29,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, PostMessageW, SetCoalescableTimer, SetTimer, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_YESNO, SW_SHOWNORMAL};
+use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, PostMessageW, SetCoalescableTimer, SetTimer, IDOK, IDYES, MB_ICONINFORMATION, MB_ICONQUESTION, MB_OK, MB_OKCANCEL, MB_YESNO, SW_SHOWNORMAL};
 
 /// Timer ids on the main window.
 pub const POLL_TIMER: usize = 1;
@@ -111,6 +111,8 @@ pub struct App {
     products: BTreeMap<String, String>,
     /// Protocols found by Try to detect, kept for this run: device id to protocol id.
     probed: Rc<RefCell<BTreeMap<String, &'static str>>>,
+    /// Devices Try to detect found nothing on in this run; they are not sent the commands again.
+    failed_probes: std::collections::BTreeSet<String>,
     is_scanning: bool,
     is_scan_wanted: bool,
     /// When each device last gave a %, so one missed read does not blank a good one.
@@ -326,6 +328,7 @@ impl App {
             interfaces: BTreeMap::new(),
             products: BTreeMap::new(),
             probed: Rc::new(RefCell::new(BTreeMap::new())),
+            failed_probes: std::collections::BTreeSet::new(),
             is_scanning: false,
             is_scan_wanted: false,
             last_read: HashMap::new(),
@@ -380,8 +383,9 @@ impl App {
             }
         }
         self.show_devices();
-        if let Some((_, found)) = result.probe {
+        if let Some((id, found)) = result.probe {
             if !found {
+                self.failed_probes.insert(id);
                 self.tell_probe_failed();
             }
         }
@@ -561,6 +565,15 @@ impl App {
         unsafe { MessageBoxW(self.window, text.as_ptr(), title.as_ptr(), MB_YESNO | MB_ICONQUESTION) == IDYES }
     }
 
+    /// Asks once whether Try to detect may send a battery read command to an unknown device. True for OK.
+    fn asks_to_probe(&self) -> bool {
+        use juicebar_shared::scan::{PROBE_DETAIL, PROBE_QUESTION};
+        let title = to_wide("Juice Bar");
+        let text = to_wide(&format!("{PROBE_QUESTION}\n\n{PROBE_DETAIL}"));
+        // SAFETY: both strings outlive the call.
+        unsafe { MessageBoxW(self.window, text.as_ptr(), title.as_ptr(), MB_OKCANCEL | MB_ICONQUESTION) == IDOK }
+    }
+
     fn tell_probe_failed(&self) {
         let title = to_wide("Juice Bar");
         let text = to_wide("None of the protocols Juice Bar knows answered this device.\n\nUse Report so it can be added in a later version.");
@@ -584,6 +597,18 @@ impl App {
             MenuAction::Quit => return false,
             MenuAction::Report(id) => self.report(&id),
             MenuAction::Detect(id) => {
+                // A device that did not answer already is not sent the commands again in this run.
+                if self.failed_probes.contains(&id) {
+                    self.tell_probe_failed();
+                    return true;
+                }
+                if !self.settings.borrow().is_probe_agreed {
+                    if !self.asks_to_probe() {
+                        return true;
+                    }
+                    self.settings.borrow_mut().is_probe_agreed = true;
+                    self.settings.borrow().save();
+                }
                 if self.is_scanning {
                     self.is_scan_wanted = false;
                 }
