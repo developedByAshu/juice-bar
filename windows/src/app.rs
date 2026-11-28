@@ -188,6 +188,8 @@ fn scan(api: &mut Option<hidapi::HidApi>, request: &ScanRequest) -> ScanResult {
         }
     }
     devices.extend(bluetooth_devices());
+    // A mouse switched to Bluetooth with its dongle still plugged in: only the live row stays.
+    let devices = juicebar_shared::device::drop_idle_twins(devices);
     ScanResult { devices, interfaces, probe }
 }
 
