@@ -418,51 +418,55 @@ fn start_hid_thread() -> Sender<HidJob> {
                     Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
                 }
             };
-            if let Some(job) = job {
-                if let Some(api) = api.as_mut() {
-                    let _ = api.refresh_devices();
-                }
-                match job {
-                    HidJob::Scan(settings) => {
-                        // The mouse's interface (page 0x0A) opens only with Input Monitoring; ask once, when such a dongle is present.
-                        if let Some(api) = api.as_ref() {
-                            let needs_monitoring = api.device_list().any(|info| info.usage_page() == 0x000A && juicebar_shared::catalog::find_known(info.vendor_id(), info.product_id(), 0x000A).is_some());
-                            if needs_monitoring && !crate::permissions::has_input_monitoring() {
-                                crate::permissions::request_input_monitoring();
-                            }
-                        }
-                        let bluetooth = read_bluetooth_entries();
-                        let scanned = api.as_ref().map_or_else(Vec::new, |api| scan_dongles(api, &settings, &|kind| remembered_bluetooth_names(&bluetooth, kind)));
-                        watches = api.as_ref().map_or_else(Vec::new, open_keyboard_watches);
-                        dispatch2::DispatchQueue::main().exec_async(move || {
-                            with_app(|app| {
-                                let scanned = keep_recent_readings(app, scanned);
-                                app.scanned = scanned;
-                                crate::ble_battery::refresh(&bluetooth);
-                                app.bluetooth = bluetooth;
-                                app.is_scanning = false;
-                                rebuild(app);
-                            });
-                        });
+            // HID objects macOS hands back while opening and reading devices are autoreleased. This plain
+            // thread has no pool of its own, so without one per pass every scan leaked about 1 MB of them.
+            objc2::rc::autoreleasepool(|_| {
+                if let Some(job) = job {
+                    if let Some(api) = api.as_mut() {
+                        let _ = api.refresh_devices();
                     }
-                    HidJob::Probe { tag, usb, settings, bluetooth } => {
-                        let Some(api) = api.as_ref() else {
-                            continue;
-                        };
-                        let (reading, protocol) = probe_usb_device(api, &usb);
-                        let device = build_device(&usb, &reading, protocol, &settings, &remembered_bluetooth_names(&bluetooth, usb.kind()));
-                        dispatch2::DispatchQueue::main().exec_async(move || {
-                            with_app(|app| {
-                                if let Some(scanned) = app.scanned.get_mut(tag as usize) {
-                                    scanned.device = device;
+                    match job {
+                        HidJob::Scan(settings) => {
+                            // The mouse's interface (page 0x0A) opens only with Input Monitoring; ask once, when such a dongle is present.
+                            if let Some(api) = api.as_ref() {
+                                let needs_monitoring = api.device_list().any(|info| info.usage_page() == 0x000A && juicebar_shared::catalog::find_known(info.vendor_id(), info.product_id(), 0x000A).is_some());
+                                if needs_monitoring && !crate::permissions::has_input_monitoring() {
+                                    crate::permissions::request_input_monitoring();
                                 }
-                                rebuild(app);
+                            }
+                            let bluetooth = read_bluetooth_entries();
+                            let scanned = api.as_ref().map_or_else(Vec::new, |api| scan_dongles(api, &settings, &|kind| remembered_bluetooth_names(&bluetooth, kind)));
+                            watches = api.as_ref().map_or_else(Vec::new, open_keyboard_watches);
+                            dispatch2::DispatchQueue::main().exec_async(move || {
+                                with_app(|app| {
+                                    let scanned = keep_recent_readings(app, scanned);
+                                    app.scanned = scanned;
+                                    crate::ble_battery::refresh(&bluetooth);
+                                    app.bluetooth = bluetooth;
+                                    app.is_scanning = false;
+                                    rebuild(app);
+                                });
                             });
-                        });
+                        }
+                        HidJob::Probe { tag, usb, settings, bluetooth } => {
+                            let Some(api) = api.as_ref() else {
+                                return;
+                            };
+                            let (reading, protocol) = probe_usb_device(api, &usb);
+                            let device = build_device(&usb, &reading, protocol, &settings, &remembered_bluetooth_names(&bluetooth, usb.kind()));
+                            dispatch2::DispatchQueue::main().exec_async(move || {
+                                with_app(|app| {
+                                    if let Some(scanned) = app.scanned.get_mut(tag as usize) {
+                                        scanned.device = device;
+                                    }
+                                    rebuild(app);
+                                });
+                            });
+                        }
                     }
                 }
-            }
-            wait_for_keyboard_events(&mut watches);
+                wait_for_keyboard_events(&mut watches);
+            });
         }
     });
     sender
