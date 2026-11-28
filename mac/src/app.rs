@@ -611,8 +611,19 @@ pub fn redraw_icon() {
     with_app(rebuild);
 }
 
-/// Runs the opt-in probe on one unknown dongle.
+/// Runs the opt-in probe on one unknown dongle, once the user has agreed to it the first time.
 pub fn probe(tag: isize) {
+    if !with_app(|app| app.settings.is_probe_agreed).unwrap_or(false) {
+        if !asks_to_probe() {
+            return;
+        }
+        with_app(|app| {
+            app.settings.is_probe_agreed = true;
+            app.settings.save();
+            // The open window keeps its own copy, so it must not save the old choice back later.
+            crate::settings_ui::on_devices_changed(&app.settings, &app.found);
+        });
+    }
     let job = with_app(|app| {
         let id = &app.shown.get(tag as usize)?.id;
         let index = app.scanned.iter().position(|scanned| &scanned.device.id == id)?;
@@ -622,6 +633,21 @@ pub fn probe(tag: isize) {
     if let Some(job) = job {
         send_hid_job(job);
     }
+}
+
+/// Asks once whether Try to detect may send a battery read command to an unknown device. True for Try.
+fn asks_to_probe() -> bool {
+    use juicebar_shared::scan::{PROBE_DETAIL, PROBE_QUESTION};
+    let mtm = main_thread();
+    let alert = objc2_app_kit::NSAlert::new(mtm);
+    alert.setMessageText(&objc2_foundation::NSString::from_str(PROBE_QUESTION));
+    alert.setInformativeText(&objc2_foundation::NSString::from_str(PROBE_DETAIL));
+    alert.addButtonWithTitle(&objc2_foundation::NSString::from_str("Try"));
+    alert.addButtonWithTitle(&objc2_foundation::NSString::from_str("Cancel"));
+    let application = NSApplication::sharedApplication(mtm);
+    // SAFETY: a plain call on the shared application; a menu bar app must come forward for its alert to show.
+    let _: () = unsafe { objc2::msg_send![&*application, activateIgnoringOtherApps: true] };
+    alert.runModal() == objc2_app_kit::NSAlertFirstButtonReturn
 }
 
 /// Returns the Report link for the device behind a row.
