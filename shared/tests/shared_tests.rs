@@ -4,9 +4,10 @@ use juicebar_shared::protocols::bytech::{build_request, parse_event, parse_power
 use juicebar_shared::protocols::yuandaxin::{self, Yuandaxin};
 use juicebar_shared::protocols::{BatteryProtocol, Reading};
 use juicebar_shared::report::report_url;
-use juicebar_shared::settings::{ClickAction, HoverAction, Settings, MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
+use juicebar_shared::settings::{ClickAction, HoverAction, Settings, MAX_WINDOW_THEME, MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
 use juicebar_shared::tone::{icon_tone, tone_for_percent, Tone};
 use juicebar_shared::transport::ReplayTransport;
+use juicebar_shared::update::UpdateCheck;
 
 fn fixture(name: &str) -> String {
     std::fs::read_to_string(format!("{}/tests/fixtures/{name}", env!("CARGO_MANIFEST_DIR"))).expect("fixture")
@@ -198,4 +199,34 @@ fn hover_and_click_choices_survive_a_save_and_default_to_todays_behaviour() {
     assert_eq!((loaded.hover_action, loaded.click_action), (HoverAction::Card, ClickAction::Settings));
     assert_eq!(Settings::from_text("click_action=9").click_action, ClickAction::Devices, "an unknown number falls back");
     assert_eq!(Settings::from_text("click_action=1").click_action, ClickAction::Devices, "the old card loads as Devices");
+}
+
+#[test]
+fn window_and_update_choices_survive_a_save_and_an_old_file_loads_the_defaults() {
+    let fresh = Settings::from_text("poll_minutes=5\n");
+    assert_eq!((fresh.window_theme, fresh.keeps_on_top, fresh.update_check, fresh.last_update_check), (0, false, UpdateCheck::Daily, 0));
+    let chosen = Settings { window_theme: 2, keeps_on_top: true, update_check: UpdateCheck::Weekly, last_update_check: 1_795_000_000, ..Settings::default() };
+    let loaded = Settings::from_text(&chosen.to_text());
+    assert_eq!((loaded.window_theme, loaded.keeps_on_top, loaded.update_check, loaded.last_update_check), (2, true, UpdateCheck::Weekly, 1_795_000_000));
+    assert_eq!(Settings::from_text("window_theme=7").window_theme, MAX_WINDOW_THEME, "an unknown theme is held to dark");
+    assert_eq!(Settings::from_text("update_check=x").update_check, UpdateCheck::Daily);
+}
+
+#[test]
+fn reset_this_page_puts_back_only_the_appearance_choices() {
+    let mut settings = Settings { shows_percent_in_icon: true, menu_font_points: MENU_FONT_POINTS_MAX, window_theme: 1, poll_minutes: 20, hover_action: HoverAction::Card, ..Settings::default() };
+    settings.renames.insert("mouse".into(), "My mouse".into());
+    settings.reset_appearance();
+    assert_eq!((settings.shows_percent_in_icon, settings.menu_font_points, settings.window_theme), (false, MENU_FONT_POINTS_DEFAULT, 0));
+    assert_eq!((settings.poll_minutes, settings.hover_action, settings.renames.len()), (20, HoverAction::Card, 1), "other pages keep their choices");
+}
+
+#[test]
+fn reset_all_keeps_only_when_updates_were_last_checked() {
+    let mut settings = Settings { last_update_check: 123, update_check: UpdateCheck::Never, keeps_on_top: true, poll_minutes: 20, is_saved_to_disk: false, ..Settings::default() };
+    settings.renames.insert("mouse".into(), "My mouse".into());
+    settings.reset_all();
+    assert_eq!(settings.last_update_check, 123);
+    assert_eq!((settings.update_check, settings.keeps_on_top, settings.poll_minutes, settings.renames.len()), (UpdateCheck::Daily, false, 5, 0));
+    assert!(!settings.is_saved_to_disk, "a preview stays a preview");
 }
