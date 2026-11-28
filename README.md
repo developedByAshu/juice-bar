@@ -159,4 +159,4 @@ Ideas from open source battery tools such as BatteryBar, BatteryTray, Wireless D
 
 [GPL-3.0](LICENSE)
 
-<!-- README reviewed 28 Nov 2026 -->
+<!-- README reviewed 29 Nov 2026 -->
