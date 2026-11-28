@@ -8,9 +8,10 @@
 use crate::bluetooth::{bluetooth_devices, remembered_names_by_kind};
 use crate::menu_ui::{close_hover_card, close_menu, is_menu_open, refresh_menu, set_menu_text_points, show_card, show_menu, take_menu_action, MenuAction};
 use crate::messages::{WM_APP_KEYBOARD_EVENT, WM_APP_SCAN_DONE};
-use crate::settings_ui::{close_settings, open_settings, refresh_settings};
+use crate::settings_ui::{close_settings, is_settings_open, open_settings, refresh_settings};
 use crate::status_icon::{create_status_icon, set_tooltip, update_status_icon, use_hover_card};
 use crate::theme::{notify_theme_change, set_theme_choice};
+use crate::updater;
 use crate::util::to_wide;
 use juicebar_shared::demo::{is_demo_mode, sample_devices};
 use juicebar_shared::device::{Battery, Device, NameSource};
@@ -19,18 +20,25 @@ use juicebar_shared::report::{report_url, InterfaceSummary};
 use juicebar_shared::scan::{build_device, probe_usb_device, scan_dongles, ScannedDevice};
 use juicebar_shared::settings::{ClickAction, HoverAction, Settings};
 use juicebar_shared::tone::{icon_tone, lowest_percent};
+use juicebar_shared::update::is_check_due;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use windows_sys::Win32::Foundation::HWND;
 use windows_sys::Win32::UI::Shell::ShellExecuteW;
-use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, PostMessageW, SetCoalescableTimer, MB_ICONINFORMATION, MB_OK, SW_SHOWNORMAL};
+use windows_sys::Win32::UI::WindowsAndMessaging::{KillTimer, MessageBoxW, PostMessageW, SetCoalescableTimer, SetTimer, MB_ICONINFORMATION, MB_OK, SW_SHOWNORMAL};
 
 /// Timer ids on the main window.
 pub const POLL_TIMER: usize = 1;
 pub const SOON_TIMER: usize = 2;
+/// Fires once LAUNCH_CHECK_DELAY_MS after launch, then hourly, to see whether an update check is due.
+pub const UPDATE_TIMER: usize = 3;
+// The first look waits, so it never slows startup.
+const LAUNCH_CHECK_DELAY_MS: u32 = 30_000;
+const UPDATE_RECHECK_MS: u32 = 60 * 60 * 1000;
 // The poll may run up to this late, so Windows can line it up with other wakeups and save power.
 const POLL_TOLERANCE_MS: u32 = 5_000;
 // A dongle needs a moment after wake or plug-in before it answers.
@@ -107,6 +115,10 @@ pub struct App {
     asleep: Vec<(u16, u16)>,
     /// The % each sleeping keyboard had when its dongle said it fell asleep, shown again on its wake.
     slept: HashMap<String, Battery>,
+    /// False until the first update timer fires, which is the "On launch" check.
+    has_launch_check_run: bool,
+    /// A downloaded, checked update waiting for the settings window to close.
+    waiting_update: Option<PathBuf>,
 }
 
 thread_local! {
@@ -310,7 +322,11 @@ impl App {
             last_read: HashMap::new(),
             asleep: Vec::new(),
             slept: HashMap::new(),
+            has_launch_check_run: false,
+            waiting_update: None,
         };
+        // SAFETY: a timer on our own window; the first look for an update waits until startup is done.
+        unsafe { SetTimer(window, UPDATE_TIMER, LAUNCH_CHECK_DELAY_MS, None) };
         set_theme_choice(app.settings.borrow().window_theme);
         create_status_icon(window);
         crate::menu_ui::set_menu_owner(window);
@@ -451,6 +467,10 @@ impl App {
 
     /// Handles the app's timers.
     pub fn on_timer(&mut self, timer: usize) {
+        if timer == UPDATE_TIMER {
+            self.on_update_timer();
+            return;
+        }
         if timer == SOON_TIMER {
             // SAFETY: stopping our own one-shot timer.
             unsafe { KillTimer(self.window, SOON_TIMER) };
@@ -475,6 +495,47 @@ impl App {
         // Renames and confirmed names are applied by the next read; demo and real alike.
         self.refresh();
         self.show_devices();
+    }
+
+    /// Looks for an update when the chosen interval says one is due. The first run is the launch check.
+    fn on_update_timer(&mut self) {
+        let is_launch = !self.has_launch_check_run;
+        if is_launch {
+            self.has_launch_check_run = true;
+            // SAFETY: replaces the one-shot launch timer on our own window with the hourly one.
+            unsafe { SetTimer(self.window, UPDATE_TIMER, UPDATE_RECHECK_MS, None) };
+        }
+        let (choice, last_check) = {
+            let settings = self.settings.borrow();
+            (settings.update_check, settings.last_update_check)
+        };
+        if is_check_due(choice, last_check, updater::now_seconds(), is_launch) {
+            updater::check_now(self.window);
+        }
+    }
+
+    /**
+     * Takes a step of the update check: saves when GitHub answered, and swaps in a checked update
+     * once the settings window is closed. Returns false when the app should quit for the new copy.
+     */
+    pub fn on_update(&mut self) -> bool {
+        if let Some(outcome) = updater::take_outcome() {
+            if let Some(checked_at) = outcome.checked_at {
+                self.settings.borrow_mut().last_update_check = checked_at;
+                self.settings.borrow().save();
+            }
+            if outcome.new_copy.is_some() {
+                self.waiting_update = outcome.new_copy;
+            }
+        }
+        refresh_settings();
+        if is_settings_open() {
+            return true;
+        }
+        match self.waiting_update.take() {
+            Some(new_copy) => !updater::install(&new_copy),
+            None => true,
+        }
     }
 
     fn tell_probe_failed(&self) {

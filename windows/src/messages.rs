@@ -12,3 +12,5 @@ pub const WM_APP_MENU_ACTION: u32 = WM_APP + 3;
 pub const WM_APP_SETTINGS_CHANGED: u32 = WM_APP + 4;
 /// A keyboard dongle pushed a wake, sleep or battery event; it waits in the app.
 pub const WM_APP_KEYBOARD_EVENT: u32 = WM_APP + 5;
+/// The update check moved a step, or the settings window closed while an update waits.
+pub const WM_APP_UPDATE: u32 = WM_APP + 6;

@@ -7,13 +7,15 @@ use crate::confirm_sheet::{confirm_click, confirm_hover, confirm_key, dismiss_co
 use crate::app::with_renames;
 use crate::glyph::glass_image;
 use crate::menu_ui::{connection_label, fit_text};
-use crate::messages::WM_APP_SETTINGS_CHANGED;
+use crate::messages::{WM_APP_SETTINGS_CHANGED, WM_APP_UPDATE};
 use crate::startup;
 use crate::tray_pin;
 use crate::theme::{apply_window_look, current_theme, draw_made_with_love, on_theme_change, Backdrop, Theme, GREEN, ICON_FONT, UI_FONT, UI_FONT_STRONG};
+use crate::updater;
 use crate::util::{scale, to_wide};
 use juicebar_shared::device::{Device, NameSource};
 use juicebar_shared::settings::{ClickAction, HoverAction, Settings, MAX_WINDOW_THEME, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
+use juicebar_shared::update::{status_text, UpdateCheck, UPDATE_CHECK_LABELS};
 use std::cell::RefCell;
 use std::rc::Rc;
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
@@ -64,6 +66,9 @@ const FIELD_HEIGHT: i32 = 30;
 const ICON_PENCIL: &str = "\u{E70F}";
 const ICON_SAVE: &str = "\u{E73E}";
 const ICON_CANCEL: &str = "\u{E711}";
+const SEGMENT_PAD: i32 = 13;
+const COMPACT_SEGMENT_PAD: i32 = 8;
+const COMPACT_SEGMENT_COUNT: usize = 5;
 const DISABLED_FILL: f32 = 0.35;
 const DISABLED_TEXT: f32 = 0.5;
 const EDIT_SUBCLASS: usize = 1;
@@ -84,6 +89,7 @@ const DEVELOPER_NAME: &str = "Ashutosh Anand";
 const DEVELOPER_ORIGIN: &str = "From India";
 const RESET_LABEL: &str = "Reset all";
 const RESET_PAGE_LABEL: &str = "Reset";
+const CHECK_NOW_LABEL: &str = "Check now";
 const RESET_PAGE_DONE_TEXT: &str = "Done. Appearance is back to its default.";
 // The green "Done" line under Reset stays this long after a reset, as on the Mac.
 const RESET_DONE_MS: u32 = 4_000;
@@ -99,7 +105,7 @@ const GOOD_LIGHT: u32 = 0x248A3D;
 
 /// What Juice Bar does and does not do with data, shown on the About page.
 const PRIVACY_LINES: [&str; 4] = [
-    "Juice Bar never connects to the internet on its own.",
+    "Only connects to GitHub to check for updates. Nothing about you is sent.",
     "It only reads battery levels from your wireless devices.",
     "Your settings and renames are stored only on this PC.",
     "Report sends only device ids, and only when you choose.",
@@ -138,6 +144,7 @@ enum Control {
     /// One option of a segmented choice: the row and the option's number.
     Choice(Setting, u8),
     StartupToggle,
+    CheckNow,
     Reset,
     ResetPage,
     Rename(usize),
@@ -159,6 +166,8 @@ enum Setting {
     Click,
     OnTop,
     Startup,
+    UpdateCheck,
+    CheckNow,
     ResetPage,
     Reset,
 }
@@ -266,7 +275,15 @@ fn own_name(state: &Window, id: &str) -> String {
 /// Returns the pieces of the current page, top to bottom.
 fn page_blocks(state: &Window) -> Vec<Block> {
     match state.page {
-        Page::General => vec![Block::Section("Startup"), Block::Setting(Setting::Startup), Block::Section("Battery checks"), Block::Setting(Setting::Poll)],
+        Page::General => vec![
+            Block::Section("Startup"),
+            Block::Setting(Setting::Startup),
+            Block::Section("Battery checks"),
+            Block::Setting(Setting::Poll),
+            Block::Section("Updates"),
+            Block::Setting(Setting::UpdateCheck),
+            Block::Setting(Setting::CheckNow),
+        ],
         Page::Appearance => vec![
             // NetSpeedGauge's Appearance page opens with the same Theme row.
             Block::Section("Theme"),
@@ -383,9 +400,12 @@ fn layout(state: &Window, canvas: &Canvas) -> Vec<(Control, RECT)> {
             Block::Setting(Setting::Startup) => controls.push((Control::StartupToggle, row(top))),
             Block::Setting(Setting::TaskbarPin) => controls.push((Control::PinToggle, row(top))),
             Block::Setting(Setting::OnTop) => controls.push((Control::OnTopToggle, row(top))),
-            Block::Setting(setting @ (Setting::Hover | Setting::Click | Setting::Theme)) => controls.extend(segment_rects(canvas, state.fonts.body, setting, right, top, dpi)),
+            Block::Setting(setting @ (Setting::Hover | Setting::Click | Setting::Theme | Setting::UpdateCheck)) => controls.extend(segment_rects(canvas, state.fonts.body, setting, right, top, dpi)),
             Block::Setting(Setting::Reset) => {
                 controls.push((Control::Reset, button_rect(canvas, state.fonts.body, RESET_LABEL, right, top, dpi)));
+            }
+            Block::Setting(Setting::CheckNow) => {
+                controls.push((Control::CheckNow, button_rect(canvas, state.fonts.body, CHECK_NOW_LABEL, right, top, dpi)));
             }
             Block::Setting(Setting::ResetPage) => {
                 controls.push((Control::ResetPage, button_rect(canvas, state.fonts.body, RESET_PAGE_LABEL, right, top, dpi)));
@@ -581,8 +601,9 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                     Setting::MenuText => rect_of(Control::MenuTextLess).map_or(right, |rect| rect.left),
                     Setting::Reset => rect_of(Control::Reset).map_or(right, |rect| rect.left),
                     Setting::ResetPage => rect_of(Control::ResetPage).map_or(right, |rect| rect.left),
+                    Setting::CheckNow => rect_of(Control::CheckNow).map_or(right, |rect| rect.left),
                     Setting::Percent | Setting::Startup | Setting::TaskbarPin | Setting::OnTop => toggle_rect(right, top, dpi).left,
-                    Setting::Hover | Setting::Click | Setting::Theme => rect_of(Control::Choice(setting, 0)).map_or(right, |rect| rect.left),
+                    Setting::Hover | Setting::Click | Setting::Theme | Setting::UpdateCheck => rect_of(Control::Choice(setting, 0)).map_or(right, |rect| rect.left),
                 };
                 let label_room = control_left - scale(14, dpi) - text_x;
                 match setting {
@@ -593,8 +614,9 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                             draw_stepper(canvas, state, (Control::PollLess, Control::PollMore), &less, &more, &format!("{minutes} min"), minutes > MIN_POLL_MINUTES, minutes < MAX_POLL_MINUTES);
                         }
                     }
-                    Setting::Hover | Setting::Click | Setting::Theme => {
+                    Setting::Hover | Setting::Click | Setting::Theme | Setting::UpdateCheck => {
                         let (label, hint, chosen) = match setting {
+                            Setting::UpdateCheck => ("Check for updates", "", settings.update_check.number() as u8),
                             Setting::Hover => ("On hover", "When the pointer rests on the icon", settings.hover_action.number()),
                             Setting::Click => ("On click", "Right-click opens Settings and Quit", u8::from(settings.click_action == ClickAction::Settings)),
                             _ => ("Juice Bar windows", "", settings.window_theme),
@@ -621,6 +643,14 @@ fn draw_page(state: &Window, canvas: &mut Canvas, controls: &[(Control, RECT)]) 
                         draw_toggle(canvas, &theme, &toggle, is_on, dpi);
                         if state.focused == Some(control) {
                             draw_focus(canvas, &theme, &toggle, dpi);
+                        }
+                    }
+                    Setting::CheckNow => {
+                        let last_checked = updater::time_label(settings.last_update_check);
+                        let hint = status_text(&updater::status(), juicebar_shared::APP_VERSION, last_checked.as_deref());
+                        row_label(canvas, state, text_x, top, "Check now", &hint, label_room);
+                        if let Some(rect) = rect_of(Control::CheckNow) {
+                            draw_button(canvas, state, &rect, CHECK_NOW_LABEL, Control::CheckNow, false);
                         }
                     }
                     Setting::Reset | Setting::ResetPage => {
@@ -808,6 +838,7 @@ fn activate(control: Control) {
                     match setting {
                         Setting::Hover => settings.hover_action = HoverAction::from_number(option),
                         Setting::Theme => settings.window_theme = option.min(MAX_WINDOW_THEME),
+                        Setting::UpdateCheck => settings.update_check = UpdateCheck::from_number(i64::from(option)),
                         _ => settings.click_action = if option == 1 { ClickAction::Settings } else { ClickAction::Devices },
                     }
                 }
@@ -827,6 +858,11 @@ fn activate(control: Control) {
                 set_on_top(state.window, keeps_on_top);
                 save_and_announce(state);
             });
+        }
+        Control::CheckNow => {
+            if let Some(owner) = with_window(|state| state.owner) {
+                updater::check_now(owner);
+            }
         }
         Control::ResetPage => {
             with_window(|state| {
@@ -890,13 +926,15 @@ fn segment_options(setting: Setting) -> &'static [&'static str] {
         Setting::Hover => &["Nothing", "Battery card"],
         // NetSpeedGauge's window theme options, in its order: 0 system, 1 light, 2 dark.
         Setting::Theme => &["Same as system", "Light", "Dark"],
+        Setting::UpdateCheck => &UPDATE_CHECK_LABELS,
         _ => &["Devices", "Settings"],
     }
 }
 
 /// Returns each option's rectangle of a segmented choice ending at the right edge, NetSpeedGauge's sizes.
 fn segment_rects(canvas: &Canvas, font: HFONT, setting: Setting, right: i32, top: i32, dpi: u32) -> Vec<(Control, RECT)> {
-    let pad = scale(13, dpi);
+    // Five options leave the label too little room at NetSpeedGauge's padding, so they sit closer.
+    let pad = scale(if segment_options(setting).len() >= COMPACT_SEGMENT_COUNT { COMPACT_SEGMENT_PAD } else { SEGMENT_PAD }, dpi);
     let widths: Vec<i32> = segment_options(setting).iter().map(|option| canvas.text_width(option, font) + pad * 2).collect();
     let (segment_top, height) = (top + scale(9, dpi), scale(32, dpi));
     let mut x = right - widths.iter().sum::<i32>();
@@ -1299,6 +1337,8 @@ unsafe extern "system" fn settings_proc(window: HWND, message: u32, wparam: WPAR
             dismiss_confirm();
             if let Some(state) = WINDOW.with(|cell| cell.borrow_mut().take()) {
                 DeleteObject(state.edit_brush);
+                // An update downloaded while Settings was open goes in now.
+                PostMessageW(state.owner, WM_APP_UPDATE, 0, 0);
             }
             0
         }
@@ -1434,6 +1474,11 @@ pub fn refresh_settings() {
     if !is_renaming {
         invalidate();
     }
+}
+
+/// Returns true while the settings window is open; an update waits for it to close.
+pub fn is_settings_open() -> bool {
+    WINDOW.with(|cell| cell.try_borrow().map_or(true, |state| state.is_some()))
 }
 
 /// Closes the settings window if it is open.

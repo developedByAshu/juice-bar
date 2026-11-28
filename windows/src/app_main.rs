@@ -1,7 +1,7 @@
 //! The process entry: one copy only, the hidden main window and its message handling.
 
 use crate::app::{with_app, App};
-use crate::messages::{WM_APP_KEYBOARD_EVENT, WM_APP_MENU_ACTION, WM_APP_SCAN_DONE, WM_APP_SETTINGS_CHANGED, WM_APP_TRAY};
+use crate::messages::{WM_APP_KEYBOARD_EVENT, WM_APP_MENU_ACTION, WM_APP_SCAN_DONE, WM_APP_SETTINGS_CHANGED, WM_APP_TRAY, WM_APP_UPDATE};
 use crate::status_icon::{redraw_status_icon, remove_status_icon, restore_status_icon};
 use crate::theme::notify_theme_change;
 use crate::util::to_wide;
@@ -72,6 +72,13 @@ unsafe extern "system" fn window_proc(window: HWND, message: u32, wparam: WPARAM
             with_app(App::on_settings_changed);
             0
         }
+        WM_APP_UPDATE => {
+            // An installed update has started the new copy, which waits for this one to quit.
+            if with_app(App::on_update) == Some(false) {
+                quit(window);
+            }
+            0
+        }
         WM_TIMER => {
             with_app(|app| app.on_timer(wparam));
             0
@@ -128,6 +135,8 @@ pub fn run() {
     let class_name = to_wide(WINDOW_CLASS_NAME);
     let title = to_wide("Juice Bar");
     let taskbar_created = to_wide("TaskbarCreated");
+    // After an update, wait for the old copy to quit first, so the one-copy check below lets this one in.
+    crate::updater::finish_update();
     // SAFETY: Win32 setup on the main thread. All strings outlive the calls that read them.
     unsafe {
         let _instance_guard = CreateMutexW(std::ptr::null(), 0, instance_name.as_ptr());
