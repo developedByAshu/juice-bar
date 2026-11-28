@@ -331,3 +331,23 @@ fn a_bluetooth_row_with_no_vendor_id_hides_nothing() {
     let rows = vec![row(DeviceKind::Mouse, Connection::Dongle, 0, 55), row(DeviceKind::Mouse, Connection::Bluetooth, 0, 80)];
     assert_eq!(drop_idle_twins(rows).len(), 2);
 }
+
+#[test]
+fn a_junk_bluetooth_reading_falls_back_to_the_dongle_reading() {
+    let mut bluetooth = row(DeviceKind::Mouse, Connection::Bluetooth, 0x04F3, 0);
+    bluetooth.battery = None;
+    let kept = drop_idle_twins(vec![row(DeviceKind::Mouse, Connection::Dongle, 0x04F3, 90), bluetooth]);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].connection, Connection::Dongle);
+    assert_eq!(kept[0].battery.map(|b| b.percent), Some(90));
+}
+
+#[test]
+fn with_no_reading_on_either_link_the_bluetooth_row_stays() {
+    let (mut dongle, mut bluetooth) = (row(DeviceKind::Mouse, Connection::Dongle, 0x04F3, 0), row(DeviceKind::Mouse, Connection::Bluetooth, 0x04F3, 0));
+    dongle.battery = None;
+    bluetooth.battery = None;
+    let kept = drop_idle_twins(vec![dongle, bluetooth]);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(kept[0].connection, Connection::Bluetooth);
+}
