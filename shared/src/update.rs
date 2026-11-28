@@ -1,11 +1,26 @@
 //! Looking for a newer release on GitHub: the parts every platform shares, so they are tested once.
 //! The Mac and Windows apps only fetch, swap the program and draw the row.
 
+use ed25519_dalek::{Signature, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 const DAY_SECONDS: u64 = 86_400;
 const SHA256_HEX_LENGTH: usize = 64;
 const GITHUB_PREFIX: &str = "https://github.com/";
+const RAW_PREFIX: &str = "https://raw.githubusercontent.com/";
+
+/// The Ed25519 key every release's SHA256SUMS.txt is signed with. Only its owner holds the private half.
+pub const RELEASE_PUBLIC_KEY: &str = "bbd08975bd6d26ecc33be00d62d3dd0f68f98d8856e7e8447896fa8bc96d02a4";
+const PUBLIC_KEY_HEX_LENGTH: usize = 64;
+const SIGNATURE_HEX_LENGTH: usize = 128;
+
+/// The only places an update file may come from: the owner's GitHub and GitHub's file stores.
+const ALLOWED_DOWNLOAD_PREFIXES: [&str; 4] = [
+    "https://github.com/developedByAshu/",
+    "https://objects.githubusercontent.com/",
+    "https://release-assets.githubusercontent.com/",
+    "https://raw.githubusercontent.com/developedByAshu/",
+];
 
 /// How often the app looks for a new release, as the "Check for updates" row.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -88,6 +103,55 @@ pub fn latest_release_url(repository: &str) -> Option<String> {
     (!owner.is_empty() && !repo.is_empty() && !repo.contains('/')).then(|| format!("https://api.github.com/repos/{owner}/{repo}/releases/latest"))
 }
 
+/// Returns the raw link of a release's signature file, `signatures/<tag>.sig` on main. A tag with
+/// anything but letters, digits, dots, dashes and underscores gives None, so it cannot leave that folder.
+pub fn signature_url(repository: &str, tag: &str) -> Option<String> {
+    let path = repository.trim().trim_end_matches('/').trim_end_matches(".git").strip_prefix(GITHUB_PREFIX)?;
+    let (owner, repo) = path.split_once('/')?;
+    let is_plain_tag = !tag.is_empty() && !tag.starts_with('.') && tag.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    (!owner.is_empty() && !repo.is_empty() && !repo.contains('/') && is_plain_tag).then(|| format!("{RAW_PREFIX}{owner}/{repo}/main/signatures/{tag}.sig"))
+}
+
+/// Returns true when an update file may be downloaded from this link.
+pub fn is_allowed_download_url(url: &str) -> bool {
+    ALLOWED_DOWNLOAD_PREFIXES.iter().any(|prefix| url.starts_with(prefix)) && !url.contains("..") && !url.contains('@')
+}
+
+/// Reads hex text into exactly `N` bytes, or None when it is the wrong length or not hex.
+fn hex_bytes<const N: usize>(text: &str) -> Option<[u8; N]> {
+    let text = text.as_bytes();
+    if text.len() != N * 2 {
+        return None;
+    }
+    let mut bytes = [0u8; N];
+    for (byte, pair) in bytes.iter_mut().zip(text.chunks(2)) {
+        *byte = u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()?;
+    }
+    Some(bytes)
+}
+
+/**
+ * Returns true when `signature_hex` (the one line of a .sig file) is a valid Ed25519 signature by
+ * `public_key_hex` over the exact bytes of SHA256SUMS.txt. Anything unreadable is false.
+ */
+pub fn is_signed_by(public_key_hex: &str, sums: &[u8], signature_hex: &str) -> bool {
+    let (Some(key), Some(signature)) = (hex_bytes::<{ PUBLIC_KEY_HEX_LENGTH / 2 }>(public_key_hex.trim()), hex_bytes::<{ SIGNATURE_HEX_LENGTH / 2 }>(signature_hex.trim())) else {
+        return false;
+    };
+    let Ok(key) = VerifyingKey::from_bytes(&key) else { return false };
+    key.verify_strict(sums, &Signature::from_bytes(&signature)).is_ok()
+}
+
+/// Returns true when SHA256SUMS.txt carries the release key's signature. Nothing is installed without it.
+pub fn is_release_signed(sums: &[u8], signature_hex: &str) -> bool {
+    is_signed_by(RELEASE_PUBLIC_KEY, sums, signature_hex)
+}
+
+/// Returns the question asked before an update goes in, such as "Juice Bar 0.2.0 is ready. Install now?".
+pub fn install_question(app_name: &str, version: &str) -> String {
+    format!("{app_name} {} is ready. Install now?", version.trim_start_matches(['v', 'V']))
+}
+
 /// Returns the User-Agent GitHub asks every client for: the app's name, nothing about the user.
 pub fn user_agent(app_name: &str) -> String {
     format!("{}-updater", app_name.replace(' ', ""))
@@ -149,7 +213,7 @@ pub enum UpdateStatus {
     Checking,
     UpToDate,
     Downloading(String),
-    /// The new copy is downloaded and checked; it goes in when the Settings window closes.
+    /// The new copy is downloaded and checked; the app asks to install it once the Settings window closes.
     Ready(String),
     Failed,
 }
@@ -174,7 +238,7 @@ pub fn status_text(status: &UpdateStatus, current_version: &str, last_checked: O
         UpdateStatus::Checking => "Checking...".to_string(),
         UpdateStatus::UpToDate => format!("Up to date ({current_version})"),
         UpdateStatus::Downloading(version) => format!("Downloading {}...", version.trim_start_matches(['v', 'V'])),
-        UpdateStatus::Ready(version) => format!("Updates to {} when Settings closes", version.trim_start_matches(['v', 'V'])),
+        UpdateStatus::Ready(version) => format!("Asks to install {} when Settings closes", version.trim_start_matches(['v', 'V'])),
         UpdateStatus::Failed => "Could not reach GitHub".to_string(),
     }
 }
