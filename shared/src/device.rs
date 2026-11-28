@@ -75,3 +75,11 @@ pub fn unknown_name(kind: DeviceKind) -> &'static str {
         DeviceKind::Other => "Unknown device",
     }
 }
+
+/// Drops a dongle row while a Bluetooth row of the same kind and vendor is connected: that is the same
+/// device switched to Bluetooth with its dongle still plugged in, and the dongle row would show the last
+/// % it heard, stale. Different devices on different links (a Bluetooth mouse, a 2.4 GHz keyboard) all stay.
+pub fn drop_idle_twins(rows: Vec<Device>) -> Vec<Device> {
+    let on_bluetooth: Vec<(DeviceKind, u16)> = rows.iter().filter(|row| row.connection == Connection::Bluetooth && row.vendor_id != 0).map(|row| (row.kind, row.vendor_id)).collect();
+    rows.into_iter().filter(|row| row.connection != Connection::Dongle || !on_bluetooth.contains(&(row.kind, row.vendor_id))).collect()
+}
