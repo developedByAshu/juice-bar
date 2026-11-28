@@ -1,0 +1,4 @@
+# The Rust the releases are built with, so a new stable cannot change a release unseen.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy"]

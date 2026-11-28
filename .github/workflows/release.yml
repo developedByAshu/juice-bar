@@ -6,38 +6,75 @@ on:
     tags:
       - "v*"
 
+# Read only by default; only the job that publishes the release can write.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   mac:
-    runs-on: macos-latest
+    runs-on: macos-15
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
       - name: Run the tests
         run: |
-          cargo test --release -p juicebar-shared
-          cargo clippy --release -p juicebar-mac -- -D warnings
+          cargo test --locked --release -p juicebar-shared
+          cargo clippy --locked --release -p juicebar-mac -- -D warnings
+
+      # The owner's self-signed certificate, when the secrets hold it, goes into a keychain made for
+      # this job only and deleted at its end. Without it bundle.sh signs ad hoc.
+      - name: Import the signing certificate
+        env:
+          MAC_CERT_P12: ${{ secrets.MAC_CERT_P12 }}
+          MAC_CERT_PASSWORD: ${{ secrets.MAC_CERT_PASSWORD }}
+        run: |
+          if [ -z "$MAC_CERT_P12" ] || [ -z "$MAC_CERT_PASSWORD" ]; then
+            echo "No signing certificate in the secrets, the app is signed ad hoc."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(openssl rand -hex 24)"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          printf '%s' "$MAC_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MAC_CERT_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain"
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          security find-certificate -c "developedByAshu Code Signing" -p "$keychain" > "$RUNNER_TEMP/cert.pem"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign -k "$keychain" "$RUNNER_TEMP/cert.pem"
+          rm -f "$RUNNER_TEMP/cert.pem"
+          echo "MAC_SIGN_IDENTITY=developedByAshu Code Signing" >> "$GITHUB_ENV"
 
       - name: Build the app
         run: SKIP_TESTS=1 ./mac/bundle.sh
 
+      - name: Delete the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+
       - name: Zip the app
         run: ditto -c -k --keepParent target/mac/JuiceBar.app JuiceBar-mac-arm64.zip
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: mac-program
           path: JuiceBar-mac-arm64.zip
 
   release:
     needs: mac
-    runs-on: windows-latest
+    runs-on: windows-2025
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: mac-program
           path: dist
@@ -46,13 +83,13 @@ jobs:
         run: rustup target add aarch64-pc-windows-msvc
 
       - name: Run the tests
-        run: cargo test --release -p juicebar-shared -p juicebar-windows
+        run: cargo test --locked --release -p juicebar-shared -p juicebar-windows
 
       - name: Build for x64
-        run: cargo build --release -p juicebar-windows --bin JuiceBar
+        run: cargo build --locked --release -p juicebar-windows --bin JuiceBar
 
       - name: Build for ARM64
-        run: cargo build --release -p juicebar-windows --bin JuiceBar --target aarch64-pc-windows-msvc
+        run: cargo build --locked --release -p juicebar-windows --bin JuiceBar --target aarch64-pc-windows-msvc
 
       - name: Collect the programs and their checksums
         shell: pwsh
@@ -63,6 +100,8 @@ jobs:
             "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
           } | Set-Content dist\SHA256SUMS.txt
 
+      # The apps install an update only once signatures/<tag>.sig, signed over this exact
+      # SHA256SUMS.txt with the owner's private key, is on main. That key never comes near this workflow.
       - name: Publish the release
         shell: pwsh
         env:

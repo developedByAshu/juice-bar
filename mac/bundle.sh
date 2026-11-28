@@ -4,8 +4,8 @@ set -e
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 # The release workflow runs its own tests, because some here need a Mac with real network traffic.
-[ -n "$SKIP_TESTS" ] || cargo test -p juicebar-shared
-cargo build --release --target aarch64-apple-darwin -p juicebar-mac --bin JuiceBar
+[ -n "$SKIP_TESTS" ] || cargo test --locked -p juicebar-shared
+cargo build --locked --release --target aarch64-apple-darwin -p juicebar-mac --bin JuiceBar
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
 app="target/mac/JuiceBar.app"
 rm -rf "$app"
