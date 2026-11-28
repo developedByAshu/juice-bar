@@ -14,3 +14,7 @@ path = "src/lib.rs"
 hidapi = { version = "2.6", default-features = false, features = ["windows-native"] }
 ed25519-dalek = { version = "3", default-features = false }
 sha2 = { version = "0.10", default-features = false }
+
+[dev-dependencies]
+# Signs test sums with a throwaway key, to check the verification both ways.
+ed25519-dalek = { version = "3", default-features = false }

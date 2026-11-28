@@ -123,6 +123,6 @@ fn the_check_now_hint_says_where_it_stands() {
     assert_eq!(status_text(&UpdateStatus::Checking, "0.1.1", None), "Checking...");
     assert_eq!(status_text(&UpdateStatus::UpToDate, "0.1.1", None), "Up to date (0.1.1)");
     assert_eq!(status_text(&UpdateStatus::Downloading("v0.2.0".into()), "0.1.1", None), "Downloading 0.2.0...");
-    assert_eq!(status_text(&UpdateStatus::Ready("v0.2.0".into()), "0.1.1", None), "Updates to 0.2.0 when Settings closes");
+    assert_eq!(status_text(&UpdateStatus::Ready("v0.2.0".into()), "0.1.1", None), "Asks to install 0.2.0 when Settings closes");
     assert_eq!(status_text(&UpdateStatus::Failed, "0.1.1", None), "Could not reach GitHub");
 }

@@ -3,7 +3,10 @@ use juicebar_shared::names::{resolve_name, NameCandidates};
 use juicebar_shared::protocols::bytech::{build_request, parse_event, parse_power_answer, with_pushed_percent, Bytech, KeyboardEvent};
 use juicebar_shared::protocols::yuandaxin::{self, Yuandaxin};
 use juicebar_shared::protocols::{BatteryProtocol, Reading};
-use juicebar_shared::report::report_url;
+use juicebar_shared::catalog::find_by_ids;
+use juicebar_shared::protocols::declares_report_id;
+use juicebar_shared::report::{report_body, report_url};
+use juicebar_shared::scan::UsbDevice;
 use juicebar_shared::settings::{ClickAction, HoverAction, Settings, MAX_WINDOW_THEME, MENU_FONT_POINTS_DEFAULT, MENU_FONT_POINTS_MAX, MENU_FONT_POINTS_MIN};
 use juicebar_shared::tone::{icon_tone, tone_for_percent, Tone};
 use juicebar_shared::transport::ReplayTransport;
@@ -185,9 +188,79 @@ fn bytech_reads_the_recorded_sleep_wake_and_battery_events() {
 
 #[test]
 fn report_url_carries_ids_and_no_personal_data() {
-    let url = report_url(&device_at(50, Connection::Dongle, false), &[], "macOS 26", "0.1.0");
+    let url = report_url(&device_at(50, Connection::Dongle, false), Some("2.4G Receiver"), &[], "macOS 26", "0.1.0");
     assert!(url.starts_with("https://github.com/developedByAshu/juice-bar/issues/new?title=Device%20report%3A%203554%3Afa09"));
     assert!(url.contains("Vendor%20id%3A%200x3554"));
+}
+
+#[test]
+fn the_report_names_the_device_by_catalog_or_usb_name_never_a_rename() {
+    let mut renamed = device_at(50, Connection::Dongle, false);
+    renamed.name = "Ashu's desk keyboard".into();
+    let known = report_body(&renamed, Some("USB Receiver"), &[], "macOS 26", "0.1.0");
+    assert!(known.contains("Product name: Kreo Swarm 75\n"), "{known}");
+    assert!(!known.contains("Ashu"), "the rename stays out");
+    let mut unknown = renamed.clone();
+    (unknown.vendor_id, unknown.product_id) = (0x1234, 0x5678);
+    let body = report_body(&unknown, Some(" 2.4G Wireless\nReceiver "), &[], "macOS 26", "0.1.0");
+    assert!(body.contains("Product name: 2.4G WirelessReceiver\n"), "{body}");
+    assert!(!body.contains("Ashu"));
+    assert!(report_body(&unknown, None, &[], "macOS 26", "0.1.0").contains("Product name: not given\n"));
+}
+
+#[test]
+fn device_text_in_ids_and_names_cannot_add_settings_lines() {
+    let mut settings = Settings::default();
+    settings.renames.insert("3554:fa09:a=b\nupdate_check=4".into(), "Desk\nhidden.x=1".into());
+    settings.confirmed_bluetooth_names.insert("3554:fa09:1".into(), "Kreo\r\nkeep_on_top=1".into());
+    settings.hidden.push("bt\n:poll_minutes=60".into());
+    let text = settings.to_text();
+    assert_eq!(text.lines().count(), Settings::default().to_text().lines().count() + 3, "one line per entry:\n{text}");
+    let loaded = Settings::from_text(&text);
+    assert_eq!(loaded.update_check, UpdateCheck::Daily);
+    assert!(!loaded.keeps_on_top);
+    assert_eq!(loaded.poll_minutes, 5);
+    assert_eq!(loaded.renames.get("3554:fa09:abupdate_check4").map(String::as_str), Some("Deskhidden.x=1"));
+    assert_eq!(loaded.hidden, vec!["bt:poll_minutes60".to_string()]);
+}
+
+#[test]
+fn a_usb_id_is_cleaned_as_the_settings_file_saves_it() {
+    let usb = UsbDevice { vendor_id: 0x3554, product_id: 0xFA09, serial: "AB=\n12".into(), product: String::new(), interfaces: Vec::new() };
+    assert_eq!(usb.id(), "3554:fa09:AB12");
+    let mut settings = Settings::default();
+    settings.renames.insert(usb.id(), "Desk".into());
+    assert_eq!(Settings::from_text(&settings.to_text()).renames.get(&usb.id()).map(String::as_str), Some("Desk"), "a rename still matches after a restart");
+}
+
+#[test]
+fn the_probe_agreement_is_saved_and_off_by_default() {
+    assert!(!Settings::default().is_probe_agreed);
+    let agreed = Settings { is_probe_agreed: true, ..Settings::default() };
+    assert!(Settings::from_text(&agreed.to_text()).is_probe_agreed);
+}
+
+#[test]
+fn the_probe_sends_only_to_an_interface_that_declares_the_report() {
+    // Usage page 0xFF02, usage 1, collection, report id 19, 19 byte output report, end.
+    let bytech = [0x06, 0x02, 0xFF, 0x09, 0x01, 0xA1, 0x01, 0x85, 0x13, 0x75, 0x08, 0x95, 0x13, 0x91, 0x02, 0xC0];
+    assert!(declares_report_id(&bytech, 19));
+    assert!(!declares_report_id(&bytech, 4));
+    // Another vendor's interface on the same page: report id 6 only, and a data byte of 0x13 that is not a report id.
+    let other = [0x06, 0x02, 0xFF, 0x09, 0x13, 0xA1, 0x01, 0x85, 0x06, 0x95, 0x13, 0x81, 0x02, 0xC0];
+    assert!(!declares_report_id(&other, 19));
+    // A long item is skipped whole, even when its data looks like a report id item.
+    let long = [0xFE, 0x02, 0x00, 0x85, 0x13, 0x85, 0x04];
+    assert!(!declares_report_id(&long, 19));
+    assert!(declares_report_id(&long, 4));
+    assert!(!declares_report_id(&[0x85], 19), "a cut descriptor gives false");
+    assert!(!declares_report_id(&[], 19));
+}
+
+#[test]
+fn the_untested_wired_swarm_entry_is_gone() {
+    assert_eq!(find_by_ids(0x258A, 0x010C), None);
+    assert!(find_by_ids(0x3554, 0xFA09).is_some());
 }
 
 #[test]
