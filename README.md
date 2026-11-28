@@ -111,6 +111,10 @@ Updates install themselves: the app asks you first and checks our signature.
 </details>
 
 <details>
+<summary><b>More: Check your download, works on, privacy</b></summary>
+<br>
+
+<details>
 <summary><b>Check your download (optional)</b></summary>
 <br>
 
@@ -146,6 +150,8 @@ Tested on macOS 27 with Apple silicon and on Windows 11. There is no version for
 - That check sends only the app's name. GitHub sees your IP address, as any website does.
 - Battery readings, device names and settings stay on your computer. No account, tracking, ads or server.
 - The code is all here, so you can check it yourself.
+
+</details>
 
 </details>
 
